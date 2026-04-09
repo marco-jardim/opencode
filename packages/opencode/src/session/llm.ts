@@ -106,7 +106,15 @@ export namespace LLM {
     const system: string[] = []
     system.push(
       [
-        // use agent prompt otherwise provider prompt
+        // Use agent.prompt when defined, otherwise the provider base prompt.
+        // Do NOT concatenate both: the anthropic-fix plugin downstream caps
+        // the joined system text at ~5000 chars from the "You are an
+        // interactive" anchor, which strips a specialist prompt tacked onto
+        // the end of PROMPT_ANTHROPIC (~8.3KB). Max-plan fingerprint matching
+        // for specialist subagents is handled separately by that plugin's
+        // A5 subagent CC-prefix cache — it prepends a cached CC prefix to
+        // subagent requests whose system text doesn't start with the CC
+        // anchor. So the ELSE branch here is both correct AND necessary.
         ...(input.agent.prompt ? [input.agent.prompt] : SystemPrompt.provider(input.model)),
         // any custom prompt passed into this call
         ...input.system,
@@ -315,10 +323,64 @@ export namespace LLM {
       })
     }
 
+    // #10 Telemetry: log the anthropic-beta flags and key attribution headers
+    // that we're about to send, so fingerprint/auth regressions are visible
+    // in logs instead of hidden. Uses debug level so it only fires under
+    // OPENCODE_LOG_LEVEL=DEBUG unless something goes wrong.
+    const outboundHeaders = {
+      ...(input.model.providerID.startsWith("opencode")
+        ? {}
+        : {
+            "x-session-affinity": input.sessionID,
+            ...(input.parentSessionID ? { "x-parent-session-id": input.parentSessionID } : {}),
+            "User-Agent": `opencode/${Installation.VERSION}`,
+          }),
+      ...input.model.headers,
+      ...headers,
+    } as Record<string, string | undefined>
+    l.debug("request.headers", {
+      anthropicBeta: outboundHeaders["anthropic-beta"],
+      userAgent: outboundHeaders["User-Agent"] ?? "default",
+      sessionAffinity: outboundHeaders["x-session-affinity"],
+      parentSession: outboundHeaders["x-parent-session-id"],
+      authorization: outboundHeaders["authorization"] || outboundHeaders["Authorization"] ? "present" : "absent",
+    })
+
+    // #12 Dump full wire request body when OPENCODE_DUMP_REQUESTS is set. Useful
+    // for debugging fingerprint/cache failures — without this, there's no way
+    // to see exactly what got sent.
+    if (process.env["OPENCODE_DUMP_REQUESTS"]) {
+      l.info("wire.request", {
+        systemBlocks: system.length,
+        system0_prefix: system[0]?.slice(0, 300) ?? "",
+        system1_prefix: system[1]?.slice(0, 200) ?? "",
+        messageCount: messages.length,
+        toolCount: Object.keys(tools).length,
+        toolNames: Object.keys(tools).slice(0, 20),
+        headers: outboundHeaders,
+      })
+    }
+
     return streamText({
       onError(error) {
+        // #10 On stream error, surface the response headers too so we can
+        // diagnose billing / auth regressions from logs alone.
+        const responseHeaders =
+          typeof error === "object" && error !== null && "responseHeaders" in error
+            ? ((error as { responseHeaders?: Record<string, string> }).responseHeaders ?? {})
+            : {}
+        const statusCode =
+          typeof error === "object" && error !== null && "statusCode" in error
+            ? (error as { statusCode?: number }).statusCode
+            : undefined
         l.error("stream error", {
           error,
+          statusCode,
+          "x-request-id": responseHeaders["x-request-id"],
+          "x-account-uuid": responseHeaders["x-account-uuid"],
+          "anthropic-organization-id": responseHeaders["anthropic-organization-id"],
+          "anthropic-ratelimit-requests-remaining": responseHeaders["anthropic-ratelimit-requests-remaining"],
+          "x-should-retry": responseHeaders["x-should-retry"],
         })
       },
       async experimental_repairToolCall(failed) {

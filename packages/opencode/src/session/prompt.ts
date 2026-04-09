@@ -437,7 +437,14 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           })
         }
 
-        for (const [key, item] of Object.entries(yield* mcp.tools())) {
+        // #3 Token economy: subagents (fast/explore/summary/specialist agents)
+        // generally don't need MCP tools — those exist for the primary agent's
+        // broad surface area. MCP tool schemas are expensive to serialize
+        // (~50-100 tokens each × often 20+ tools), so skipping them for
+        // subagents saves 1-2k tokens per subagent request. Opt back in by
+        // setting agent.options.enableMcp = true in the agent definition.
+        const subagentSkipsMcp = input.agent.mode === "subagent" && !input.agent.options?.enableMcp
+        for (const [key, item] of Object.entries(subagentSkipsMcp ? {} : yield* mcp.tools())) {
           const execute = item.execute
           if (!execute) continue
 
@@ -1466,9 +1473,17 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
               yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
 
+              // #2 Token economy: subagents are task-scoped — they already
+              // received either a specialist prompt (via agent.prompt in
+              // llm.ts) or the provider base prompt, plus the caller's task
+              // brief, so opencode's environment briefing and skill catalog
+              // are redundant noise for them. Skipping saves ~500-1000 tokens
+              // per subagent request. Primary ("build"/"plan") agents still
+              // get the full context as before.
+              const isSubagent = agent.mode === "subagent"
               const [skills, env, instructions, modelMsgs] = yield* Effect.all([
-                sys.skills(agent),
-                Effect.sync(() => sys.environment(model)),
+                isSubagent ? Effect.succeed(undefined as string | undefined) : sys.skills(agent),
+                isSubagent ? Effect.succeed([] as string[]) : Effect.sync(() => sys.environment(model)),
                 instruction.system().pipe(Effect.orDie),
                 MessageV2.toModelMessagesEffect(msgs, model),
               ])
