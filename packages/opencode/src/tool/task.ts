@@ -7,6 +7,7 @@ import { MessageV2 } from "../session/message-v2"
 import { Agent } from "../agent/agent"
 import type { SessionPrompt } from "../session/prompt"
 import { Config } from "../config/config"
+import { Permission } from "@/permission"
 import { Effect } from "effect"
 import { Log } from "@/util/log"
 
@@ -15,6 +16,8 @@ export interface TaskPromptOps {
   resolvePromptParts(template: string): Effect.Effect<SessionPrompt.PromptInput["parts"]>
   prompt(input: SessionPrompt.PromptInput): Effect.Effect<MessageV2.WithParts>
 }
+
+const log = Log.create({ service: "tool.task" })
 
 const id = "task"
 
@@ -145,14 +148,46 @@ export const TaskTool = Tool.define(
               parts,
             })
 
+            // #11 Subagent cost attribution. The child session's cost/tokens
+            // live on its final assistant message; surface them in the parent's
+            // logs and tool output so a user running `opencode run` can see
+            // subagent spend inline instead of having to dig through child
+            // session records. Catches fingerprint/billing regressions at the
+            // subagent level that would otherwise be invisible to the parent.
+            const childCost = result.info.role === "assistant" ? (result.info.cost ?? 0) : 0
+            const childTokens =
+              result.info.role === "assistant"
+                ? result.info.tokens
+                : { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
+            const childModel =
+              result.info.role === "assistant"
+                ? `${result.info.providerID}/${result.info.modelID}`
+                : `${model.providerID}/${model.modelID}`
+
+            log.info("subagent.complete", {
+              subagent: params.subagent_type,
+              sessionId: nextSession.id,
+              model: childModel,
+              cost: childCost,
+              input: childTokens.input,
+              output: childTokens.output,
+              cache_read: childTokens.cache.read,
+              cache_write: childTokens.cache.write,
+            })
+
             return {
               title: params.description,
               metadata: {
                 sessionId: nextSession.id,
                 model,
+                cost: childCost,
+                tokens: childTokens,
               },
               output: [
                 `task_id: ${nextSession.id} (for resuming to continue this task if needed)`,
+                `subagent_model: ${childModel}`,
+                `subagent_cost: $${childCost.toFixed(4)}`,
+                `subagent_tokens: in=${childTokens.input} out=${childTokens.output} cache_read=${childTokens.cache.read} cache_write=${childTokens.cache.write}`,
                 "",
                 "<task_result>",
                 result.parts.findLast((item) => item.type === "text")?.text ?? "",
