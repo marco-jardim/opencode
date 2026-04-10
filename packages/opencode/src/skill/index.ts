@@ -22,6 +22,17 @@ export namespace Skill {
   const log = Log.create({ service: "skill" })
   const EXTERNAL_DIRS = [".claude", ".agents"]
   const EXTERNAL_SKILL_PATTERN = "skills/**/SKILL.md"
+  // #14 Tier 1: Claude Code plugin cache layout. Plugins installed via
+  // `claude plugin install` land at ~/.claude/plugins/cache/<publisher>/<plugin>/<ver>/skills/<skill>/SKILL.md.
+  // The standard EXTERNAL_SKILL_PATTERN (skills/**/SKILL.md) won't match those
+  // because the plugin tree doesn't start with a "skills/" directory — it's
+  // nested under "plugins/cache/**/". This second pattern captures them.
+  const PLUGIN_CACHE_SKILL_PATTERN = "plugins/cache/**/skills/**/SKILL.md"
+  // #14 Tier 2: Loose-format skills. Users often drop single .md files in
+  // ~/.claude/skills/ rather than creating a subdir per skill. These lack
+  // proper frontmatter — we infer name from filename and description from
+  // the first heading or first non-empty paragraph. See addFlat() below.
+  const EXTERNAL_FLAT_PATTERN = "skills/*.md"
   const OPENCODE_SKILL_PATTERN = "{skill,skills}/**/SKILL.md"
   const SKILL_PATTERN = "**/SKILL.md"
 
@@ -103,12 +114,79 @@ export namespace Skill {
     }
   })
 
+  // #14 Tier 2: Parse a flat .md skill file where frontmatter may be missing
+  // or incomplete. Fallback strategy:
+  //   - name: basename(file, ".md") if frontmatter.name absent
+  //   - description: first H1 heading text, else first non-empty paragraph,
+  //     truncated to 200 chars. Empty description is allowed (renders as "").
+  // Content is always the full file body (frontmatter-stripped when present).
+  const addFlat = Effect.fnUntraced(function* (state: State, match: string, bus: Bus.Interface) {
+    const md = yield* Effect.tryPromise({
+      try: () => ConfigMarkdown.parse(match),
+      catch: (err) => err,
+    }).pipe(
+      Effect.catch(
+        Effect.fnUntraced(function* (err) {
+          const message = ConfigMarkdown.FrontmatterError.isInstance(err)
+            ? err.data.message
+            : `Failed to parse flat skill ${match}`
+          const { Session } = yield* Effect.promise(() => import("@/session"))
+          yield* bus.publish(Session.Event.Error, { error: new NamedError.Unknown({ message }).toObject() })
+          log.error("failed to load flat skill", { skill: match, err })
+          return undefined
+        }),
+      ),
+    )
+
+    if (!md) return
+
+    const data = md.data as Record<string, unknown>
+    const fmName = typeof data.name === "string" ? data.name : undefined
+    const fmDesc = typeof data.description === "string" ? data.description : undefined
+    const name = fmName ?? path.basename(match, ".md")
+    const description = fmDesc ?? inferDescription(md.content)
+
+    if (state.skills[name]) {
+      log.warn("duplicate skill name", {
+        name,
+        existing: state.skills[name].location,
+        duplicate: match,
+      })
+      return
+    }
+
+    state.dirs.add(path.dirname(match))
+    state.skills[name] = {
+      name,
+      description,
+      location: match,
+      content: md.content,
+    }
+  })
+
+  // Description fallback: prefer first H1, else first non-empty paragraph,
+  // truncated to keep system-prompt footprint bounded.
+  function inferDescription(body: string): string {
+    const lines = body.split(/\r?\n/)
+    for (const line of lines) {
+      const h1 = line.match(/^#\s+(.+?)\s*$/)
+      if (h1) return h1[1].slice(0, 200)
+    }
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+      if (trimmed.startsWith("#")) continue
+      return trimmed.slice(0, 200)
+    }
+    return ""
+  }
+
   const scan = Effect.fnUntraced(function* (
     state: State,
     bus: Bus.Interface,
     root: string,
     pattern: string,
-    opts?: { dot?: boolean; scope?: string },
+    opts?: { dot?: boolean; scope?: string; flat?: boolean },
   ) {
     const matches = yield* Effect.tryPromise({
       try: () =>
@@ -128,7 +206,9 @@ export namespace Skill {
       }),
     )
 
-    yield* Effect.forEach(matches, (match) => add(state, match, bus), {
+    // #14 Dispatch to addFlat for loose .md files (Tier 2), add for SKILL.md.
+    const adder = opts?.flat ? addFlat : add
+    yield* Effect.forEach(matches, (match) => adder(state, match, bus), {
       concurrency: "unbounded",
       discard: true,
     })
@@ -148,6 +228,19 @@ export namespace Skill {
         const root = path.join(Global.Path.home, dir)
         if (!(yield* fsys.isDir(root))) continue
         yield* scan(state, bus, root, EXTERNAL_SKILL_PATTERN, { dot: true, scope: "global" })
+        // #14 Tier 2: also grab loose .md files directly in skills/.
+        yield* scan(state, bus, root, EXTERNAL_FLAT_PATTERN, { dot: true, scope: "global-flat", flat: true })
+      }
+
+      // #14 Tier 1: walk the Claude Code plugin cache at ~/.claude/plugins/cache.
+      // Plugins are discovered via the standard SKILL.md nested layout but
+      // rooted under plugins/cache/<publisher>/<plugin>/<ver>/skills/.
+      const pluginHome = path.join(Global.Path.home, ".claude")
+      if (yield* fsys.isDir(pluginHome)) {
+        yield* scan(state, bus, pluginHome, PLUGIN_CACHE_SKILL_PATTERN, {
+          dot: true,
+          scope: "plugin-cache",
+        })
       }
 
       const upDirs = yield* fsys
@@ -156,6 +249,8 @@ export namespace Skill {
 
       for (const root of upDirs) {
         yield* scan(state, bus, root, EXTERNAL_SKILL_PATTERN, { dot: true, scope: "project" })
+        // #14 Tier 2: project-level loose .md skills.
+        yield* scan(state, bus, root, EXTERNAL_FLAT_PATTERN, { dot: true, scope: "project-flat", flat: true })
       }
     }
 
