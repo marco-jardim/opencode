@@ -177,10 +177,23 @@ function task(info: ToolProps<typeof TaskTool>) {
     typeof input.description === "string" && input.description.trim().length > 0 ? input.description : undefined
   const icon = status === "error" ? "✗" : status === "running" ? "•" : "✓"
   const name = desc ?? `${agent} Task`
+  // #6 Subagent tier/cost tag. When the task tool's state metadata carries
+  // cost/tokens (see tool/task.ts #11), surface them inline so `opencode run`
+  // users see subagent spend per-call — critical for routing validation when
+  // using tier routers that dispatch work across fast/medium/heavy agents.
+  const meta = info.metadata as { cost?: number; tokens?: { cache?: { read?: number } } } | undefined
+  const cost = typeof meta?.cost === "number" ? meta.cost : undefined
+  const cacheRead = meta?.tokens?.cache?.read
+  const tag = (() => {
+    const parts: string[] = [`${agent} Agent`]
+    if (cost !== undefined && cost > 0) parts.push(`$${cost.toFixed(4)}`)
+    if (typeof cacheRead === "number" && cacheRead > 0) parts.push(`cache=${cacheRead}`)
+    return parts.join(" · ")
+  })()
   inline({
     icon,
     title: name,
-    description: desc ? `${agent} Agent` : undefined,
+    description: desc ? tag : undefined,
   })
 }
 
@@ -307,6 +320,11 @@ export const RunCommand = cmd({
         describe: "auto-approve permissions that are not explicitly denied (dangerous!)",
         default: false,
       })
+      .option("stream-stdin", {
+        type: "boolean",
+        describe: "read stdin as newline-delimited prompts, running each as a separate turn",
+        default: false,
+      })
   },
   handler: async (args) => {
     let message = [...args.message, ...(args["--"] || [])]
@@ -347,9 +365,35 @@ export const RunCommand = cmd({
       }
     }
 
-    if (!process.stdin.isTTY) message += "\n" + (await Bun.stdin.text())
+    // #8 --stream-stdin batch mode. Each newline-delimited line on stdin becomes
+    // an independent session/turn — lets you pipe prompt lists through
+    // `opencode run` without spinning the process up per query (bootstrap is
+    // expensive). Mutually exclusive with --continue/--session/--fork since
+    // those target one specific session.
+    const batch: string[] = []
+    if (args["stream-stdin"]) {
+      if (process.stdin.isTTY) {
+        UI.error("--stream-stdin requires piped stdin")
+        process.exit(1)
+      }
+      if (args.continue || args.session || args.fork) {
+        UI.error("--stream-stdin is incompatible with --continue/--session/--fork")
+        process.exit(1)
+      }
+      const text = await Bun.stdin.text()
+      for (const raw of text.split(/\r?\n/)) {
+        const line = raw.trim()
+        if (line.length > 0) batch.push(line)
+      }
+      if (batch.length === 0) {
+        UI.error("--stream-stdin received empty input")
+        process.exit(1)
+      }
+    } else {
+      if (!process.stdin.isTTY) message += "\n" + (await Bun.stdin.text())
+    }
 
-    if (message.trim().length === 0 && !args.command) {
+    if (!args["stream-stdin"] && message.trim().length === 0 && !args.command) {
       UI.error("You must provide a message or a command")
       process.exit(1)
     }
@@ -437,7 +481,9 @@ export const RunCommand = cmd({
 
       function emit(type: string, data: Record<string, unknown>) {
         if (args.format === "json") {
-          process.stdout.write(JSON.stringify({ type, timestamp: Date.now(), sessionID, ...data }) + EOL)
+          process.stdout.write(
+            JSON.stringify({ type, timestamp: Date.now(), sessionID: currentSessionID, ...data }) + EOL,
+          )
           return true
         }
         return false
@@ -445,9 +491,47 @@ export const RunCommand = cmd({
 
       const events = await sdk.event.subscribe()
       let error: string | undefined
+      // #8 Mutable session reference: batch mode rotates this per stdin line
+      // while the single `loop()` consumer keeps draining the shared events
+      // stream. Using a resolve signal for idle (instead of break) lets one
+      // loop() handle N sequential turns without losing events between them.
+      let currentSessionID: string | undefined
+      let pendingIdle: { resolve: () => void } | undefined
 
       async function loop() {
         const toggles = new Map<string, boolean>()
+        // #5 Per-turn cost/token footer. Print a compact status line after each
+        // assistant message finishes streaming so users running `opencode run`
+        // know exactly what each turn cost, how much context they burned, and
+        // what fraction came from cache — catches billing regressions and
+        // cache-miss explosions without digging through server logs.
+        const footerPrinted = new Set<string>()
+
+        function footer(info: {
+          id: string
+          cost: number
+          tokens: { input: number; output: number; cache: { read: number; write: number }; reasoning: number }
+          modelID: string
+          providerID: string
+        }) {
+          if (footerPrinted.has(info.id)) return
+          footerPrinted.add(info.id)
+          if (args.format === "json") return
+          const t = info.tokens
+          const totalIn = t.input + t.cache.read + t.cache.write
+          const cachePct = totalIn > 0 ? Math.round((t.cache.read / totalIn) * 100) : 0
+          const parts = [
+            `in=${t.input}`,
+            `out=${t.output}`,
+            `cache_read=${t.cache.read}`,
+            `cache_write=${t.cache.write}`,
+            `cache=${cachePct}%`,
+            `$${info.cost.toFixed(4)}`,
+          ]
+          UI.empty()
+          UI.println(UI.Style.TEXT_DIM + "⋯ " + parts.join(" · ") + UI.Style.TEXT_NORMAL)
+          UI.empty()
+        }
 
         for await (const event of events.stream) {
           if (
@@ -462,9 +546,28 @@ export const RunCommand = cmd({
             toggles.set("start", true)
           }
 
+          // #5 Print the cost/token footer as soon as the assistant message
+          // carries a `time.completed` timestamp. The footerPrinted set ensures
+          // it fires exactly once per message even though message.updated can
+          // fan out dozens of times during streaming.
+          if (
+            event.type === "message.updated" &&
+            event.properties.info.role === "assistant" &&
+            event.properties.info.time.completed !== undefined &&
+            event.properties.info.tokens.output > 0
+          ) {
+            footer({
+              id: event.properties.info.id,
+              cost: event.properties.info.cost,
+              tokens: event.properties.info.tokens,
+              modelID: event.properties.info.modelID,
+              providerID: event.properties.info.providerID,
+            })
+          }
+
           if (event.type === "message.part.updated") {
             const part = event.properties.part
-            if (part.sessionID !== sessionID) continue
+            if (part.sessionID !== currentSessionID) continue
 
             if (part.type === "tool" && (part.state.status === "completed" || part.state.status === "error")) {
               if (emit("tool_use", { part })) continue
@@ -528,7 +631,7 @@ export const RunCommand = cmd({
 
           if (event.type === "session.error") {
             const props = event.properties
-            if (props.sessionID !== sessionID || !props.error) continue
+            if (props.sessionID !== currentSessionID || !props.error) continue
             let err = String(props.error.name)
             if ("data" in props.error && props.error.data && "message" in props.error.data) {
               err = String(props.error.data.message)
@@ -540,15 +643,21 @@ export const RunCommand = cmd({
 
           if (
             event.type === "session.status" &&
-            event.properties.sessionID === sessionID &&
+            event.properties.sessionID === currentSessionID &&
             event.properties.status.type === "idle"
           ) {
-            break
+            // #8 Signal turn-complete to runTurn() via pendingIdle instead of
+            // breaking. loop() keeps draining events so the next batch turn
+            // doesn't drop its own message.updated/part.updated stream.
+            const pending = pendingIdle
+            pendingIdle = undefined
+            pending?.resolve()
+            continue
           }
 
           if (event.type === "permission.asked") {
             const permission = event.properties
-            if (permission.sessionID !== sessionID) continue
+            if (permission.sessionID !== currentSessionID) continue
 
             if (args["dangerously-skip-permissions"]) {
               await sdk.permission.reply({
@@ -632,36 +741,73 @@ export const RunCommand = cmd({
         return args.agent
       })()
 
-      const sessionID = await session(sdk)
-      if (!sessionID) {
-        UI.error("Session not found")
-        process.exit(1)
-      }
-      await share(sdk, sessionID)
-
+      // Start loop() once — it drains events for the entire execute() lifetime.
       loop().catch((e) => {
         console.error(e)
         process.exit(1)
       })
 
-      if (args.command) {
-        await sdk.session.command({
-          sessionID,
-          agent,
-          model: args.model,
-          command: args.command,
-          arguments: message,
-          variant: args.variant,
+      async function runTurn(text: string, freshSession: boolean) {
+        const id = await (async () => {
+          if (freshSession) {
+            const name = (() => {
+              if (args.title === undefined) return
+              if (args.title !== "") return args.title
+              return text.slice(0, 50) + (text.length > 50 ? "..." : "")
+            })()
+            const result = await sdk.session.create({ title: name, permission: rules })
+            return result.data?.id
+          }
+          return session(sdk)
+        })()
+        if (!id) {
+          UI.error("Session not found")
+          process.exit(1)
+        }
+        await share(sdk, id)
+
+        currentSessionID = id
+        const idlePromise = new Promise<void>((resolve) => {
+          pendingIdle = { resolve }
         })
+
+        if (args.command) {
+          await sdk.session.command({
+            sessionID: id,
+            agent,
+            model: args.model,
+            command: args.command,
+            arguments: text,
+            variant: args.variant,
+          })
+        } else {
+          const model = args.model ? Provider.parseModel(args.model) : undefined
+          await sdk.session.prompt({
+            sessionID: id,
+            agent,
+            model,
+            variant: args.variant,
+            parts: [...files, { type: "text", text }],
+          })
+        }
+
+        // #8 Wait for the session.status idle event before continuing to the
+        // next batch turn. Prevents interleaved output when running multiple
+        // stdin lines in sequence.
+        await idlePromise
+      }
+
+      if (batch.length > 0) {
+        for (let i = 0; i < batch.length; i++) {
+          if (args.format !== "json") {
+            const preview = batch[i].slice(0, 72) + (batch[i].length > 72 ? "..." : "")
+            UI.empty()
+            UI.println(UI.Style.TEXT_INFO_BOLD + `[${i + 1}/${batch.length}] ${preview}`)
+          }
+          await runTurn(batch[i], true)
+        }
       } else {
-        const model = args.model ? Provider.parseModel(args.model) : undefined
-        await sdk.session.prompt({
-          sessionID,
-          agent,
-          model,
-          variant: args.variant,
-          parts: [...files, { type: "text", text: message }],
-        })
+        await runTurn(message, false)
       }
     }
 

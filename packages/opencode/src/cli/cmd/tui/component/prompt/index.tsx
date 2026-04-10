@@ -153,9 +153,21 @@ export function Prompt(props: PromptProps) {
     if (tokens <= 0) return
 
     const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
-    const pct = model?.limit.context ? `${Math.round((tokens / model.limit.context) * 100)}%` : undefined
+    const ctxLimit = model?.limit.context
+    const pctNum = ctxLimit ? Math.min(100, Math.round((tokens / ctxLimit) * 100)) : undefined
+    const pct = pctNum !== undefined ? `${pctNum}%` : undefined
+    // #7 Visual context-window progress bar. A 10-cell bar makes the budget
+    // instantly legible without forcing users to parse a percentage number —
+    // especially valuable when burning through large-context conversations
+    // where cache misses and tool-result bloat can silently explode usage.
+    const bar = (() => {
+      if (pctNum === undefined) return undefined
+      const filled = Math.min(10, Math.max(0, Math.round(pctNum / 10)))
+      return "[" + "█".repeat(filled) + "░".repeat(10 - filled) + "]"
+    })()
     const cost = msg.reduce((sum, item) => sum + (item.role === "assistant" ? item.cost : 0), 0)
     return {
+      bar,
       context: pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens),
       cost: cost > 0 ? money.format(cost) : undefined,
     }
@@ -1245,7 +1257,7 @@ export function Prompt(props: PromptProps) {
                     <Match when={usage()}>
                       {(item) => (
                         <text fg={theme.textMuted} wrapMode="none">
-                          {[item().context, item().cost].filter(Boolean).join(" · ")}
+                          {[item().bar, item().context, item().cost].filter(Boolean).join(" · ")}
                         </text>
                       )}
                     </Match>
