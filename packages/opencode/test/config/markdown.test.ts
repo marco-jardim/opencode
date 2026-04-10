@@ -211,6 +211,31 @@ Always structure your responses using clear markdown formatting:
   })
 })
 
+describe("ConfigMarkdown: frontmatter with hyphenated keys and colons", async () => {
+  // Regression: Claude Code commands frequently use hyphenated keys like
+  // `allowed-tools` with values containing parens + colons such as
+  // `Bash(git:*)`. The fallback sanitizer's key regex must accept hyphens
+  // or these files blow up gray-matter.
+  const result = await ConfigMarkdown.parse(import.meta.dir + "/fixtures/hyphenated-keys.md")
+
+  test("should parse without throwing", () => {
+    expect(result).toBeDefined()
+    expect(result.data).toBeDefined()
+  })
+
+  test("should extract description", () => {
+    expect(result.data.description).toBe("Run CodeRabbit AI code review on your changes")
+  })
+
+  test("should extract argument-hint", () => {
+    expect(result.data["argument-hint"]).toBe("[type] [--base <branch>]")
+  })
+
+  test("should extract allowed-tools with embedded colons", () => {
+    expect(result.data["allowed-tools"]).toBe("Bash(coderabbit:*), Bash(cr:*), Bash(git:*)")
+  })
+})
+
 describe("ConfigMarkdown: frontmatter has weird model id", async () => {
   const result = await ConfigMarkdown.parse(import.meta.dir + "/fixtures/weird-model-id.md")
 

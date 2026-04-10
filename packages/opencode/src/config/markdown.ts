@@ -38,8 +38,11 @@ export namespace ConfigMarkdown {
         continue
       }
 
-      // match key: value pattern
-      const kvMatch = line.match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*:\s*(.*)$/)
+      // match key: value pattern — YAML keys commonly use hyphens
+      // (e.g. `allowed-tools: Bash(git:*)` in Claude Code commands), so we
+      // must accept them here or the colon-quoting branch below never runs
+      // and the line explodes gray-matter.
+      const kvMatch = line.match(/^([a-zA-Z_][a-zA-Z0-9_-]*)\s*:\s*(.*)$/)
       if (!kvMatch) {
         result.push(line)
         continue
@@ -54,8 +57,16 @@ export namespace ConfigMarkdown {
         continue
       }
 
-      // if value contains a colon, convert to block scalar
-      if (value.includes(":")) {
+      // Convert to block scalar when the value contains any YAML flow
+      // indicators or control characters. Gray-matter happily parses plain
+      // scalars containing `$`, `'`, `"`, `(`, `)`, etc., but chokes on
+      // `:` (key:value), `[`, `]`, `{`, `}`, `,` (flow seq/map), and values
+      // starting with `-`, `?`, `@`, `*`, `&`, `!`, `|`, `>`, `` ` ``, `#`,
+      // `%`. Block scalar form `|-` sidesteps all of these without needing
+      // escape logic.
+      const startsSpecial = /^[-?@*&!|>`#%]/.test(value)
+      const hasFlow = /[:[\]{},]/.test(value)
+      if (startsSpecial || hasFlow) {
         result.push(`${key}: |-`)
         result.push(`  ${value}`)
         continue
