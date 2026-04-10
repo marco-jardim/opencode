@@ -20,6 +20,13 @@ export namespace SessionRetry {
   }
 
   export function delay(attempt: number, error?: MessageV2.APIError) {
+    // #13 Overloaded (529) needs extra breathing room — hammering a
+    // struggling provider just makes things worse. Double the base and
+    // use a higher backoff factor for this code path specifically.
+    const isOverloaded = error?.data.statusCode === 529
+    const initial = isOverloaded ? RETRY_INITIAL_DELAY * 2 : RETRY_INITIAL_DELAY
+    const factor = isOverloaded ? 3 : RETRY_BACKOFF_FACTOR
+
     if (error) {
       const headers = error.data.responseHeaders
       if (headers) {
@@ -45,17 +52,22 @@ export namespace SessionRetry {
           }
         }
 
-        return cap(RETRY_INITIAL_DELAY * Math.pow(RETRY_BACKOFF_FACTOR, attempt - 1))
+        return cap(initial * Math.pow(factor, attempt - 1))
       }
     }
 
-    return cap(Math.min(RETRY_INITIAL_DELAY * Math.pow(RETRY_BACKOFF_FACTOR, attempt - 1), RETRY_MAX_DELAY_NO_HEADERS))
+    return cap(Math.min(initial * Math.pow(factor, attempt - 1), RETRY_MAX_DELAY_NO_HEADERS))
   }
 
   export function retryable(error: Err) {
     // context overflow errors should not be retried
     if (MessageV2.ContextOverflowError.isInstance(error)) return undefined
     if (MessageV2.APIError.isInstance(error)) {
+      // #13 Auth failures (401/403) must never be retried — retrying thrashes
+      // the account and masks the real problem. Billing errors (402) likewise.
+      const status = error.data.statusCode
+      if (status === 401 || status === 403) return undefined
+      if (status === 402) return undefined
       if (!error.data.isRetryable) return undefined
       if (error.data.responseBody?.includes("FreeUsageLimitError")) return GO_UPSELL_MESSAGE
       return error.data.message.includes("Overloaded") ? "Provider is overloaded" : error.data.message
