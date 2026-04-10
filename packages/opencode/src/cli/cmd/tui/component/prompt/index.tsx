@@ -64,11 +64,6 @@ export type PromptRef = {
   submit(): void
 }
 
-const money = new Intl.NumberFormat("en-US", {
-  style: "currency",
-  currency: "USD",
-})
-
 function randomIndex(count: number) {
   if (count <= 0) return 0
   return Math.floor(Math.random() * count)
@@ -142,10 +137,58 @@ export function Prompt(props: PromptProps) {
     return messages.findLast((m): m is UserMessage => m.role === "user")
   })
 
+  function compactNum(n: number): string {
+    if (n >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, "") + "M"
+    if (n >= 1_000) return (n / 1_000).toFixed(1).replace(/\.0$/, "") + "k"
+    return String(n)
+  }
+
+  const [turnElapsed, setTurnElapsed] = createSignal("")
+  const turnStart = { ts: 0 }
+  createEffect(() => {
+    const s = status()
+    if (s.type !== "idle") {
+      if (!turnStart.ts) turnStart.ts = Date.now()
+      const interval = setInterval(() => {
+        const sec = Math.floor((Date.now() - turnStart.ts) / 1000)
+        const m = Math.floor(sec / 60)
+        const ss = sec % 60
+        setTurnElapsed(m > 0 ? `${m}m${String(ss).padStart(2, "0")}s` : `${ss}s`)
+      }, 1000)
+      onCleanup(() => clearInterval(interval))
+    } else {
+      turnStart.ts = 0
+    }
+  })
+
+  const turnToolCount = createMemo(() => {
+    if (!props.sessionID) return 0
+    const msg = sync.data.message[props.sessionID] ?? []
+    const last = msg.findLast((m): m is AssistantMessage => m.role === "assistant")
+    if (!last) return 0
+    const parts = sync.data.part[last.id] ?? []
+    return parts.filter((p) => p.type === "tool").length
+  })
+
+  const compactionCount = createMemo(() => {
+    if (!props.sessionID) return 0
+    const msg = sync.data.message[props.sessionID] ?? []
+    let count = 0
+    for (const m of msg) {
+      if (m.role !== "assistant") continue
+      const parts = sync.data.part[m.id] ?? []
+      count += parts.filter((p) => p.type === "compaction").length
+    }
+    return count
+  })
+
   const usage = createMemo(() => {
     if (!props.sessionID) return
     const msg = sync.data.message[props.sessionID] ?? []
-    const last = msg.findLast((item): item is AssistantMessage => item.role === "assistant" && item.tokens.output > 0)
+    const assistants = msg.filter(
+      (item): item is AssistantMessage => item.role === "assistant" && item.tokens.output > 0,
+    )
+    const last = assistants.at(-1)
     if (!last) return
 
     const tokens =
@@ -156,20 +199,27 @@ export function Prompt(props: PromptProps) {
     const ctxLimit = model?.limit.context
     const pctNum = ctxLimit ? Math.min(100, Math.round((tokens / ctxLimit) * 100)) : undefined
     const pct = pctNum !== undefined ? `${pctNum}%` : undefined
-    // #7 Visual context-window progress bar. A 10-cell bar makes the budget
-    // instantly legible without forcing users to parse a percentage number —
-    // especially valuable when burning through large-context conversations
-    // where cache misses and tool-result bloat can silently explode usage.
-    const bar = (() => {
-      if (pctNum === undefined) return undefined
-      const filled = Math.min(10, Math.max(0, Math.round(pctNum / 10)))
-      return "[" + "█".repeat(filled) + "░".repeat(10 - filled) + "]"
-    })()
-    const cost = msg.reduce((sum, item) => sum + (item.role === "assistant" ? item.cost : 0), 0)
+    const cacheRead = last.tokens.cache.read
+    const cacheWrite = last.tokens.cache.write
+    const cacheTotal = cacheRead + cacheWrite
+    const hasCache = cacheTotal > 0
+    const cacheHitRate = hasCache ? Math.round((cacheRead / (last.tokens.input + cacheTotal)) * 100) : undefined
+
+    const turnIn = last.tokens.input + cacheRead + cacheWrite
+    const turnOut = last.tokens.output + last.tokens.reasoning
+
+    const sessionIn = assistants.reduce(
+      (sum, m) => sum + m.tokens.input + m.tokens.cache.read + m.tokens.cache.write,
+      0,
+    )
+    const sessionOut = assistants.reduce((sum, m) => sum + m.tokens.output + m.tokens.reasoning, 0)
+
     return {
-      bar,
-      context: pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens),
-      cost: cost > 0 ? money.format(cost) : undefined,
+      context: pct ? `${compactNum(tokens)} (${pct})` : compactNum(tokens),
+      cacheHitRate: cacheHitRate !== undefined ? `${cacheHitRate}%` : undefined,
+      cacheRW: hasCache ? `${compactNum(cacheRead)}/${compactNum(cacheWrite)}` : undefined,
+      turn: `↑${compactNum(turnIn)} ↓${compactNum(turnOut)}`,
+      session: `Σ ↑${compactNum(sessionIn)} ↓${compactNum(sessionOut)}`,
     }
   })
 
@@ -1257,7 +1307,18 @@ export function Prompt(props: PromptProps) {
                     <Match when={usage()}>
                       {(item) => (
                         <text fg={theme.textMuted} wrapMode="none">
-                          {[item().bar, item().context, item().cost].filter(Boolean).join(" · ")}
+                          {[
+                            `🧠 ${item().context}`,
+                            item().cacheHitRate ? `💾 ${item().cacheHitRate}` : undefined,
+                            item().cacheRW ? `↕ ${item().cacheRW}` : undefined,
+                            item().turn,
+                            item().session,
+                            turnToolCount() > 0 ? `⚡${turnToolCount()}` : undefined,
+                            compactionCount() > 0 ? `📦${compactionCount()}x` : undefined,
+                            turnElapsed() || undefined,
+                          ]
+                            .filter(Boolean)
+                            .join(" · ")}
                         </text>
                       )}
                     </Match>
