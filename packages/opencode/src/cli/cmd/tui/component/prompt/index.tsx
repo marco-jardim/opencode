@@ -150,7 +150,7 @@ export function Prompt(props: PromptProps) {
   const [turnElapsed, setTurnElapsed] = createSignal("")
   const [tps, setTps] = createSignal<{ value: number; live: boolean } | null>(null)
   // Intentionally non-reactive — mutated inside the interval, read only by adjacent branches
-  const turnState = { ts: 0, lastTokenCount: 0, lastTokenTs: 0 }
+  const turnState = { ts: 0, lastTokenCount: 0, lastTokenTs: 0, tpsSamples: [] as number[] }
   createEffect(() => {
     const s = status()
     if (s.type !== "idle") {
@@ -158,6 +158,7 @@ export function Prompt(props: PromptProps) {
         turnState.ts = Date.now()
         turnState.lastTokenTs = Date.now()
         turnState.lastTokenCount = 0
+        turnState.tpsSamples = []
       }
       const interval = setInterval(() => {
         const now = Date.now()
@@ -171,24 +172,23 @@ export function Prompt(props: PromptProps) {
         const delta = outNow - turnState.lastTokenCount
         const deltaMs = now - turnState.lastTokenTs
         if (delta > 0 && deltaMs > 0) {
-          setTps({ value: Math.round((delta / deltaMs) * 1000), live: true })
+          const instant = (delta / deltaMs) * 1000
+          turnState.tpsSamples.push(instant)
+          setTps({ value: Math.round(instant), live: true })
         }
         turnState.lastTokenCount = outNow
         turnState.lastTokenTs = now
       }, 1000)
       onCleanup(() => clearInterval(interval))
     } else {
-      if (turnState.ts > 0) {
-        const last = lastAssistant()
-        const elapsed = (Date.now() - turnState.ts) / 1000
-        if (last && elapsed > 0) {
-          const out = last.tokens.output + last.tokens.reasoning
-          setTps({ value: Math.round(out / elapsed), live: false })
-        }
+      if (turnState.tpsSamples.length > 0) {
+        const avg = turnState.tpsSamples.reduce((a, b) => a + b, 0) / turnState.tpsSamples.length
+        setTps({ value: Math.round(avg), live: false })
       }
       turnState.ts = 0
       turnState.lastTokenCount = 0
       turnState.lastTokenTs = 0
+      turnState.tpsSamples = []
     }
   })
 
