@@ -57,6 +57,7 @@ export type TuiCommand = {
     aliases?: string[]
   }
   onSelect?: () => void
+  onSlashSubmit?: (args: string) => boolean
 }
 
 export type TuiKeybind = {
@@ -328,6 +329,9 @@ export type TuiHostSlotMap = {
   }
   home_prompt_right: {
     workspace_id?: string
+  }
+  session_above_prompt: {
+    session_id: string
   }
   session_prompt: {
     session_id: string

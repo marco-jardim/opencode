@@ -757,6 +757,18 @@ export function Prompt(props: PromptProps) {
       inputText.startsWith("/") &&
       iife(() => {
         const firstLine = inputText.split("\n")[0]
+        const [slashCmd, ...rest] = firstLine.split(" ")
+        const name = slashCmd.slice(1)
+        return command.handleSlash(name, rest.join(" "))
+      })
+    ) {
+      setStore("prompt", "input", "")
+      setStore("prompt", "parts", [])
+      input.clear()
+    } else if (
+      inputText.startsWith("/") &&
+      iife(() => {
+        const firstLine = inputText.split("\n")[0]
         const command = firstLine.split(" ")[0].slice(1)
         return sync.data.command.some((x) => x.name === command)
       })
