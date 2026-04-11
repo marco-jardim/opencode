@@ -3,11 +3,15 @@ import path from "path"
 import fs from "fs/promises"
 import { Command } from "../../src/command"
 import { Instance } from "../../src/project/instance"
+import { makeRuntime } from "../../src/effect/run-service"
 import { tmpdir } from "../fixture/fixture"
+
+const { runPromise } = makeRuntime(Command.Service, Command.defaultLayer)
+const listCommands = (): Promise<Command.Info[]> => runPromise((svc: any) => svc.list())
 
 // #33 Tier 3: End-to-end coverage for the Claude Code markdown commands loader.
 // These tests seed a temporary HOME and/or project .claude/commands directory
-// and assert the commands are surfaced by `Command.list()` with source "claude".
+// and assert the commands are surfaced by `listCommands()` with source "claude".
 
 afterEach(async () => {
   await Instance.disposeAll()
@@ -36,7 +40,7 @@ test("discovers project commands from .claude/commands", async () => {
   await Instance.provide({
     directory: tmp.path,
     fn: async () => {
-      const commands = await Command.list()
+      const commands = await listCommands()
       const hello = commands.find((c) => c.name === "hello")
       expect(hello).toBeDefined()
       expect(hello!.source).toBe("claude")
@@ -63,7 +67,7 @@ test("discovers global commands from ~/.claude/commands", async () => {
     await Instance.provide({
       directory: tmp.path,
       fn: async () => {
-        const commands = await Command.list()
+        const commands = await listCommands()
         const hello = commands.find((c) => c.name === "global-hello")
         expect(hello).toBeDefined()
         expect(hello!.source).toBe("claude")
@@ -85,19 +89,14 @@ test("namespaces nested commands with colon separator", async () => {
         { description: "Commit" },
         "git commit $ARGUMENTS",
       )
-      await writeCommand(
-        path.join(dir, ".claude", "commands", "git"),
-        "push",
-        { description: "Push" },
-        "git push",
-      )
+      await writeCommand(path.join(dir, ".claude", "commands", "git"), "push", { description: "Push" }, "git push")
     },
   })
 
   await Instance.provide({
     directory: tmp.path,
     fn: async () => {
-      const commands = await Command.list()
+      const commands = await listCommands()
       const commit = commands.find((c) => c.name === "git:commit")
       const push = commands.find((c) => c.name === "git:push")
       expect(commit).toBeDefined()
@@ -115,13 +114,22 @@ test("discovers plugin commands from ~/.claude/plugins/cache/**/commands", async
   process.env.OPENCODE_TEST_HOME = tmp.path
 
   try {
-    const pluginCommands = path.join(tmp.path, ".claude", "plugins", "cache", "publisher", "myplugin", "1.0.0", "commands")
+    const pluginCommands = path.join(
+      tmp.path,
+      ".claude",
+      "plugins",
+      "cache",
+      "publisher",
+      "myplugin",
+      "1.0.0",
+      "commands",
+    )
     await writeCommand(pluginCommands, "plug-cmd", { description: "From plugin" }, "Run the plugin thing")
 
     await Instance.provide({
       directory: tmp.path,
       fn: async () => {
-        const commands = await Command.list()
+        const commands = await listCommands()
         const cmd = commands.find((c) => c.name === "plug-cmd")
         expect(cmd).toBeDefined()
         expect(cmd!.source).toBe("claude")
@@ -158,7 +166,7 @@ Review code based on: **$ARGUMENTS**
   await Instance.provide({
     directory: tmp.path,
     fn: async () => {
-      const commands = await Command.list()
+      const commands = await listCommands()
       const review = commands.find((c) => c.name === "cr-review")
       expect(review).toBeDefined()
       expect(review!.source).toBe("claude")
@@ -192,7 +200,7 @@ test("config commands shadow claude commands with the same name", async () => {
   await Instance.provide({
     directory: tmp.path,
     fn: async () => {
-      const commands = await Command.list()
+      const commands = await listCommands()
       const deploy = commands.find((c) => c.name === "deploy")
       expect(deploy).toBeDefined()
       expect(deploy!.source).toBe("command")
@@ -231,7 +239,7 @@ skill body
   await Instance.provide({
     directory: tmp.path,
     fn: async () => {
-      const commands = await Command.list()
+      const commands = await listCommands()
       const shared = commands.find((c) => c.name === "shared")
       expect(shared).toBeDefined()
       expect(shared!.source).toBe("claude")
@@ -266,7 +274,7 @@ test("OPENCODE_DISABLE_EXTERNAL_COMMANDS skips claude command discovery", async 
     await Instance.provide({
       directory: tmp.path,
       fn: async () => {
-        const commands = await Command.list()
+        const commands = await listCommands()
         const disabled = commands.find((c) => c.name === "disabled-cmd")
         // Note: this assertion may pass-through if Flag was already loaded
         // with the env unset. Production enforcement happens at CLI startup.
