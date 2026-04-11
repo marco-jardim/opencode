@@ -25,6 +25,7 @@ import { Editor } from "@tui/util/editor"
 import { useExit } from "../../context/exit"
 import { Clipboard } from "../../util/clipboard"
 import type { AssistantMessage, FilePart, UserMessage } from "@opencode-ai/sdk/v2"
+import { formatTokens } from "@tui/util/format-tokens"
 import { TuiEvent } from "../../event"
 import { iife } from "@/util/iife"
 import { Locale } from "@/util/locale"
@@ -137,34 +138,62 @@ export function Prompt(props: PromptProps) {
     return messages.findLast((m): m is UserMessage => m.role === "user")
   })
 
-  function compactNum(n: number): string {
-    if (n >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, "") + "M"
-    if (n >= 1_000) return (n / 1_000).toFixed(1).replace(/\.0$/, "") + "k"
-    return String(n)
-  }
+  const messages = createMemo(() => {
+    if (!props.sessionID) return []
+    return sync.data.message[props.sessionID] ?? []
+  })
+
+  const assistants = createMemo(() => messages().filter((m): m is AssistantMessage => m.role === "assistant"))
+
+  const lastAssistant = createMemo(() => assistants().at(-1))
 
   const [turnElapsed, setTurnElapsed] = createSignal("")
-  const turnStart = { ts: 0 }
+  const [tps, setTps] = createSignal<{ value: number; live: boolean } | null>(null)
+  // Intentionally non-reactive — mutated inside the interval, read only by adjacent branches
+  const turnState = { ts: 0, lastTokenCount: 0, lastTokenTs: 0 }
   createEffect(() => {
     const s = status()
     if (s.type !== "idle") {
-      if (!turnStart.ts) turnStart.ts = Date.now()
+      if (!turnState.ts) {
+        turnState.ts = Date.now()
+        turnState.lastTokenTs = Date.now()
+        turnState.lastTokenCount = 0
+      }
       const interval = setInterval(() => {
-        const sec = Math.floor((Date.now() - turnStart.ts) / 1000)
+        const now = Date.now()
+        const sec = Math.floor((now - turnState.ts) / 1000)
         const m = Math.floor(sec / 60)
         const ss = sec % 60
         setTurnElapsed(m > 0 ? `${m}m${String(ss).padStart(2, "0")}s` : `${ss}s`)
+        const last = lastAssistant()
+        if (!last) return
+        const outNow = last.tokens.output + last.tokens.reasoning
+        const delta = outNow - turnState.lastTokenCount
+        const deltaMs = now - turnState.lastTokenTs
+        if (delta > 0 && deltaMs > 0) {
+          setTps({ value: Math.round((delta / deltaMs) * 1000), live: true })
+        }
+        turnState.lastTokenCount = outNow
+        turnState.lastTokenTs = now
       }, 1000)
       onCleanup(() => clearInterval(interval))
     } else {
-      turnStart.ts = 0
+      if (turnState.ts > 0) {
+        const last = lastAssistant()
+        const elapsed = (Date.now() - turnState.ts) / 1000
+        if (last && elapsed > 0) {
+          const out = last.tokens.output + last.tokens.reasoning
+          setTps({ value: Math.round(out / elapsed), live: false })
+        }
+      }
+      turnState.ts = 0
+      turnState.lastTokenCount = 0
+      turnState.lastTokenTs = 0
     }
   })
 
   const turnToolCount = createMemo(() => {
-    if (!props.sessionID) return 0
-    const msg = sync.data.message[props.sessionID] ?? []
-    const last = msg.findLast((m): m is AssistantMessage => m.role === "assistant")
+    const last = lastAssistant()
     if (!last) return 0
     const parts = sync.data.part[last.id] ?? []
     return parts.filter((p) => p.type === "tool").length
@@ -172,10 +201,8 @@ export function Prompt(props: PromptProps) {
 
   const compactionCount = createMemo(() => {
     if (!props.sessionID) return 0
-    const msg = sync.data.message[props.sessionID] ?? []
     let count = 0
-    for (const m of msg) {
-      if (m.role !== "assistant") continue
+    for (const m of assistants()) {
       const parts = sync.data.part[m.id] ?? []
       count += parts.filter((p) => p.type === "compaction").length
     }
@@ -183,12 +210,8 @@ export function Prompt(props: PromptProps) {
   })
 
   const usage = createMemo(() => {
-    if (!props.sessionID) return
-    const msg = sync.data.message[props.sessionID] ?? []
-    const assistants = msg.filter(
-      (item): item is AssistantMessage => item.role === "assistant" && item.tokens.output > 0,
-    )
-    const last = assistants.at(-1)
+    const all = assistants().filter((m) => m.tokens.output > 0)
+    const last = all.at(-1)
     if (!last) return
 
     const tokens =
@@ -208,18 +231,15 @@ export function Prompt(props: PromptProps) {
     const turnIn = last.tokens.input + cacheRead + cacheWrite
     const turnOut = last.tokens.output + last.tokens.reasoning
 
-    const sessionIn = assistants.reduce(
-      (sum, m) => sum + m.tokens.input + m.tokens.cache.read + m.tokens.cache.write,
-      0,
-    )
-    const sessionOut = assistants.reduce((sum, m) => sum + m.tokens.output + m.tokens.reasoning, 0)
+    const sessionIn = all.reduce((sum, m) => sum + m.tokens.input + m.tokens.cache.read + m.tokens.cache.write, 0)
+    const sessionOut = all.reduce((sum, m) => sum + m.tokens.output + m.tokens.reasoning, 0)
 
     return {
-      context: pct ? `${compactNum(tokens)} (${pct})` : compactNum(tokens),
+      context: pct ? `${formatTokens(tokens)} (${pct})` : formatTokens(tokens),
       cacheHitRate: cacheHitRate !== undefined ? `${cacheHitRate}%` : undefined,
-      cacheRW: hasCache ? `${compactNum(cacheRead)}/${compactNum(cacheWrite)}` : undefined,
-      turn: `↑${compactNum(turnIn)} ↓${compactNum(turnOut)}`,
-      session: `Σ ↑${compactNum(sessionIn)} ↓${compactNum(sessionOut)}`,
+      cacheRW: hasCache ? `${formatTokens(cacheRead)}/${formatTokens(cacheWrite)}` : undefined,
+      turn: `↑${formatTokens(turnIn)} ↓${formatTokens(turnOut)}`,
+      session: `Σ ↑${formatTokens(sessionIn)} ↓${formatTokens(sessionOut)}`,
     }
   })
 
@@ -1308,14 +1328,15 @@ export function Prompt(props: PromptProps) {
                       {(item) => (
                         <text fg={theme.textMuted} wrapMode="none">
                           {[
+                            turnElapsed() || undefined,
+                            compactionCount() > 0 ? `📦${compactionCount()}` : undefined,
+                            turnToolCount() > 0 ? `🔧${turnToolCount()}` : undefined,
                             `🧠 ${item().context}`,
                             item().cacheHitRate ? `💾 ${item().cacheHitRate}` : undefined,
                             item().cacheRW ? `↕ ${item().cacheRW}` : undefined,
                             item().turn,
                             item().session,
-                            turnToolCount() > 0 ? `⚡${turnToolCount()}` : undefined,
-                            compactionCount() > 0 ? `📦${compactionCount()}x` : undefined,
-                            turnElapsed() || undefined,
+                            tps() ? `${tps()!.live ? "⚡" : "≈"}${tps()!.value}t/s` : undefined,
                           ]
                             .filter(Boolean)
                             .join(" · ")}

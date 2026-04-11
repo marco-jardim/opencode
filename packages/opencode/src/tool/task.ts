@@ -148,12 +148,7 @@ export const TaskTool = Tool.define(
               parts,
             })
 
-            // #11 Subagent cost attribution. The child session's cost/tokens
-            // live on its final assistant message; surface them in the parent's
-            // logs and tool output so a user running `opencode run` can see
-            // subagent spend inline instead of having to dig through child
-            // session records. Catches fingerprint/billing regressions at the
-            // subagent level that would otherwise be invisible to the parent.
+            // Subagent cost attribution — captures direct child cost only, not recursive subagent costs.
             const childCost = result.info.role === "assistant" ? (result.info.cost ?? 0) : 0
             const childTokens =
               result.info.role === "assistant"
@@ -164,9 +159,13 @@ export const TaskTool = Tool.define(
                 ? `${result.info.providerID}/${result.info.modelID}`
                 : `${model.providerID}/${model.modelID}`
 
+            if (result.info.role !== "assistant") {
+              log.warn("subagent.unexpected_role", { role: result.info.role, session_id: nextSession.id })
+            }
+
             log.info("subagent.complete", {
               subagent: params.subagent_type,
-              sessionId: nextSession.id,
+              session_id: nextSession.id,
               model: childModel,
               cost: childCost,
               input: childTokens.input,

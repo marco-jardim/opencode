@@ -357,19 +357,16 @@ export namespace SessionProcessor {
                 usage: value.usage,
                 metadata: value.providerMetadata,
               })
-              // Telemetry: log the full cache/token split per turn so billing
-              // anomalies (e.g. cache_read=0 from a fingerprint mismatch) are
-              // visible in logs instead of only in the Anthropic billing portal.
-              log.info("usage", {
+              yield* log.info("usage", {
                 input: usage.tokens.input,
                 output: usage.tokens.output,
                 reasoning: usage.tokens.reasoning,
                 cache_read: usage.tokens.cache.read,
                 cache_write: usage.tokens.cache.write,
                 cost: usage.cost,
-                finishReason: value.finishReason,
-                modelID: ctx.model.id,
-                providerID: ctx.model.providerID,
+                finish_reason: value.finishReason,
+                model_id: ctx.model.id,
+                provider_id: ctx.model.providerID,
               })
               ctx.assistantMessage.finish = value.finishReason
               ctx.assistantMessage.cost += usage.cost

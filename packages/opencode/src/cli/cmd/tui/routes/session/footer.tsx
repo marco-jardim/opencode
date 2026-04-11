@@ -5,6 +5,8 @@ import { useDirectory } from "../../context/directory"
 import { useConnected } from "../../component/dialog-model"
 import { createStore } from "solid-js/store"
 import { useRoute } from "../../context/route"
+import { formatTokens, CACHE_HIT_GOOD, CACHE_HIT_WARN } from "../../util/format-tokens"
+import { useCacheStats } from "../../util/cache-stats"
 
 export function Footer() {
   const { theme } = useTheme()
@@ -19,6 +21,19 @@ export function Footer() {
   })
   const directory = useDirectory()
   const connected = useConnected()
+
+  const sessionMessages = createMemo(() => {
+    if (route.data.type !== "session") return undefined
+    return sync.data.message[route.data.sessionID] ?? []
+  })
+  const cache = useCacheStats(sessionMessages)
+
+  const cacheColor = createMemo(() => {
+    if (cache().turns === 0) return theme.textMuted
+    if (cache().rate >= CACHE_HIT_GOOD) return theme.success
+    if (cache().rate >= CACHE_HIT_WARN) return theme.warning
+    return theme.error
+  })
 
   const [store, setStore] = createStore({
     welcome: false,
@@ -80,6 +95,12 @@ export function Footer() {
                   </Match>
                 </Switch>
                 {mcp()} MCP
+              </text>
+            </Show>
+            <Show when={cache().turns > 0}>
+              <text fg={theme.text}>
+                <span style={{ fg: cacheColor() }}>◆</span> {Math.round(cache().rate * 100)}% R:
+                {formatTokens(cache().read)} W:{formatTokens(cache().write)}
               </text>
             </Show>
             <text fg={theme.textMuted}>/status</text>
