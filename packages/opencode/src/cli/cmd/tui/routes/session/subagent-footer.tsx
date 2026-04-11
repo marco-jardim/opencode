@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, onCleanup, Show } from "solid-js"
+import { createMemo, createSignal, Show } from "solid-js"
 import { useRouteData } from "@tui/context/route"
 import { useSync } from "@tui/context/sync"
 import { useTheme } from "@tui/context/theme"
@@ -10,6 +10,7 @@ import { Locale } from "@/util/locale"
 import { useTerminalDimensions } from "@opentui/solid"
 import { formatTokens, CACHE_HIT_GOOD, CACHE_HIT_WARN } from "../../util/format-tokens"
 import { useCacheStats } from "../../util/cache-stats"
+import { useTurnTiming } from "../../util/turn-timing"
 
 export function SubagentFooter() {
   const route = useRouteData("session")
@@ -39,49 +40,7 @@ export function SubagentFooter() {
 
   const status = createMemo(() => sync.data.session_status?.[route.sessionID] ?? { type: "idle" })
 
-  const [turnElapsed, setTurnElapsed] = createSignal("")
-  const [tps, setTps] = createSignal<{ value: number; live: boolean } | null>(null)
-  const turnState = { ts: 0, lastTokenCount: 0, lastTokenTs: 0, tpsSamples: [] as number[] }
-  createEffect(() => {
-    const s = status()
-    if (s.type !== "idle") {
-      if (!turnState.ts) {
-        turnState.ts = Date.now()
-        turnState.lastTokenTs = Date.now()
-        turnState.lastTokenCount = 0
-        turnState.tpsSamples = []
-      }
-      const interval = setInterval(() => {
-        const now = Date.now()
-        const sec = Math.floor((now - turnState.ts) / 1000)
-        const m = Math.floor(sec / 60)
-        const ss = sec % 60
-        setTurnElapsed(m > 0 ? `${m}m${String(ss).padStart(2, "0")}s` : `${ss}s`)
-        const last = lastAssistant()
-        if (!last) return
-        const outNow = last.tokens.output + last.tokens.reasoning
-        const delta = outNow - turnState.lastTokenCount
-        const deltaMs = now - turnState.lastTokenTs
-        if (delta > 0 && deltaMs > 0) {
-          const instant = (delta / deltaMs) * 1000
-          turnState.tpsSamples.push(instant)
-          setTps({ value: Math.round(instant), live: true })
-        }
-        turnState.lastTokenCount = outNow
-        turnState.lastTokenTs = now
-      }, 1000)
-      onCleanup(() => clearInterval(interval))
-    } else {
-      if (turnState.tpsSamples.length > 0) {
-        const avg = turnState.tpsSamples.reduce((a, b) => a + b, 0) / turnState.tpsSamples.length
-        setTps({ value: Math.round(avg), live: false })
-      }
-      turnState.ts = 0
-      turnState.lastTokenCount = 0
-      turnState.lastTokenTs = 0
-      turnState.tpsSamples = []
-    }
-  })
+  const { elapsed: turnElapsed, tps } = useTurnTiming(status, lastAssistant)
 
   const usage = createMemo(() => {
     const all = assistants().filter((m) => m.tokens.output > 0)

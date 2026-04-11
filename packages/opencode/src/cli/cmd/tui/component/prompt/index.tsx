@@ -26,6 +26,7 @@ import { useExit } from "../../context/exit"
 import { Clipboard } from "../../util/clipboard"
 import type { AssistantMessage, FilePart, UserMessage } from "@opencode-ai/sdk/v2"
 import { formatTokens } from "@tui/util/format-tokens"
+import { useTurnTiming } from "@tui/util/turn-timing"
 import { TuiEvent } from "../../event"
 import { iife } from "@/util/iife"
 import { Locale } from "@/util/locale"
@@ -147,50 +148,7 @@ export function Prompt(props: PromptProps) {
 
   const lastAssistant = createMemo(() => assistants().at(-1))
 
-  const [turnElapsed, setTurnElapsed] = createSignal("")
-  const [tps, setTps] = createSignal<{ value: number; live: boolean } | null>(null)
-  // Intentionally non-reactive — mutated inside the interval, read only by adjacent branches
-  const turnState = { ts: 0, lastTokenCount: 0, lastTokenTs: 0, tpsSamples: [] as number[] }
-  createEffect(() => {
-    const s = status()
-    if (s.type !== "idle") {
-      if (!turnState.ts) {
-        turnState.ts = Date.now()
-        turnState.lastTokenTs = Date.now()
-        turnState.lastTokenCount = 0
-        turnState.tpsSamples = []
-      }
-      const interval = setInterval(() => {
-        const now = Date.now()
-        const sec = Math.floor((now - turnState.ts) / 1000)
-        const m = Math.floor(sec / 60)
-        const ss = sec % 60
-        setTurnElapsed(m > 0 ? `${m}m${String(ss).padStart(2, "0")}s` : `${ss}s`)
-        const last = lastAssistant()
-        if (!last) return
-        const outNow = last.tokens.output + last.tokens.reasoning
-        const delta = outNow - turnState.lastTokenCount
-        const deltaMs = now - turnState.lastTokenTs
-        if (delta > 0 && deltaMs > 0) {
-          const instant = (delta / deltaMs) * 1000
-          turnState.tpsSamples.push(instant)
-          setTps({ value: Math.round(instant), live: true })
-        }
-        turnState.lastTokenCount = outNow
-        turnState.lastTokenTs = now
-      }, 1000)
-      onCleanup(() => clearInterval(interval))
-    } else {
-      if (turnState.tpsSamples.length > 0) {
-        const avg = turnState.tpsSamples.reduce((a, b) => a + b, 0) / turnState.tpsSamples.length
-        setTps({ value: Math.round(avg), live: false })
-      }
-      turnState.ts = 0
-      turnState.lastTokenCount = 0
-      turnState.lastTokenTs = 0
-      turnState.tpsSamples = []
-    }
-  })
+  const { elapsed: turnElapsed, tps } = useTurnTiming(status, lastAssistant)
 
   const turnToolCount = createMemo(() => {
     const last = lastAssistant()
@@ -229,11 +187,11 @@ export function Prompt(props: PromptProps) {
 
     const sessionIn = all.reduce((sum, m) => sum + m.tokens.input + m.tokens.cache.read + m.tokens.cache.write, 0)
     const sessionOut = all.reduce((sum, m) => sum + m.tokens.output + m.tokens.reasoning, 0)
-    const sessionHitRate = (() => {
-      const total = all.reduce((s, m) => s + m.tokens.input + m.tokens.cache.read + m.tokens.cache.write, 0)
-      const reads = all.reduce((s, m) => s + m.tokens.cache.read, 0)
-      return total > 0 ? Math.round((reads / total) * 100) : undefined
-    })()
+    const sessionCacheReads = all.reduce((s, m) => s + m.tokens.cache.read, 0)
+    const sessionHitRate = sessionIn > 0 ? Math.round((sessionCacheReads / sessionIn) * 100) : undefined
+
+    const cost = all.reduce((sum, m) => sum + m.cost, 0)
+    const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" })
 
     const ctxStr = ctxLimit
       ? `🧠 ${formatTokens(tokens)}/${formatTokens(ctxLimit)} (${pctNum}%)`
@@ -244,6 +202,7 @@ export function Prompt(props: PromptProps) {
       session: `Σ ↑${formatTokens(sessionIn)} ↓${formatTokens(sessionOut)}`,
       sessionHitRate: sessionHitRate !== undefined ? `💾${sessionHitRate}%` : undefined,
       context: ctxStr,
+      cost: cost > 0 ? money.format(cost) : undefined,
     }
   })
 
@@ -1352,6 +1311,7 @@ export function Prompt(props: PromptProps) {
                             item().sessionHitRate,
                             compactionCount() > 0 ? `📦${compactionCount()}` : undefined,
                             item().context,
+                            item().cost,
                           ]
                             .filter(Boolean)
                             .join(" · ")}

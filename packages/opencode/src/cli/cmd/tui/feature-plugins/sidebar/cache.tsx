@@ -46,11 +46,12 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
 
   onMount(() => {
     const statsPath = join(getPluginConfigDir(), "cache-stats.json")
+    let alive = true
 
     async function poll() {
       try {
         const data = await readFile(statsPath, "utf-8")
-        setPluginStats(JSON.parse(data))
+        if (alive) setPluginStats(JSON.parse(data))
       } catch {
         // File may not exist yet
       }
@@ -58,7 +59,10 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
 
     poll()
     watchFile(statsPath, { interval: 2000 }, () => poll())
-    onCleanup(() => unwatchFile(statsPath))
+    onCleanup(() => {
+      alive = false
+      unwatchFile(statsPath)
+    })
   })
 
   const hitRateColor = createMemo(() => {
@@ -82,8 +86,8 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
         <text fg={theme().textMuted}>
           R: {formatTokens(cache().read)} W: {formatTokens(cache().write)}
         </text>
-        <Show when={pluginStats()?.session?.cache_savings_usd}>
-          {(savings) => <text fg={theme().success}>↓ ${savings().toFixed(4)} saved</text>}
+        <Show when={pluginStats()?.session?.cache_savings_usd != null && pluginStats()?.session}>
+          {(session) => <text fg={theme().success}>↓ ${session().cache_savings_usd.toFixed(4)} saved</text>}
         </Show>
         <Show when={pluginStats()?.config}>
           {(config) => (

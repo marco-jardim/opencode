@@ -99,8 +99,8 @@ export function Footer() {
             </Show>
             <Show when={cache().turns > 0}>
               <text fg={theme.text}>
-                <span style={{ fg: cacheColor() }}>◆</span> {Math.round(cache().rate * 100)}% R:
-                {formatTokens(cache().read)} W:{formatTokens(cache().write)}
+                <span style={{ fg: cacheColor() }}>◆</span> {Math.round(cache().rate * 100)}% R:{" "}
+                {formatTokens(cache().read)} W: {formatTokens(cache().write)}
               </text>
             </Show>
             <text fg={theme.textMuted}>/status</text>

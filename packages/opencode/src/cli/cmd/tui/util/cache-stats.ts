@@ -9,7 +9,7 @@ export interface CacheStats {
   turns: number
 }
 
-export function useCacheStats(messages: Accessor<readonly Message[] | Message[] | undefined>): Accessor<CacheStats> {
+export function useCacheStats(messages: Accessor<readonly Message[] | undefined>): Accessor<CacheStats> {
   return createMemo(() => {
     const msgs = messages() ?? []
     let read = 0
@@ -19,6 +19,7 @@ export function useCacheStats(messages: Accessor<readonly Message[] | Message[] 
     for (const m of msgs) {
       if (m.role !== "assistant") continue
       const a = m as AssistantMessage
+      if (!a.tokens?.cache) continue
       read += a.tokens.cache.read
       write += a.tokens.cache.write
       input += a.tokens.input
