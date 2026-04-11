@@ -294,9 +294,11 @@ export function readV1Plugin(
     throw new TypeError(`Plugin ${spec} must default export either server() or tui(), not both`)
   }
   if (kind === "server" && server === undefined) {
+    if (mode === "detect") return
     throw new TypeError(`Plugin ${spec} must default export an object with server()`)
   }
   if (kind === "tui" && tui === undefined) {
+    if (mode === "detect") return
     throw new TypeError(`Plugin ${spec} must default export an object with tui()`)
   }
 

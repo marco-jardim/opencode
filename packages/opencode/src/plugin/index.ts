@@ -98,6 +98,11 @@ export namespace Plugin {
       hooks.push(await (plugin as PluginModule).server(input, load.options))
       return
     }
+    // v1 TUI-only plugin — no server entry, skip legacy fallback
+    if (plugin === undefined) {
+      const def = load.mod.default
+      if (def && typeof def === "object" && ("tui" in (def as object) || "id" in (def as object))) return
+    }
 
     for (const server of getLegacyPlugins(load.mod)) {
       hooks.push(await server(input, load.options))

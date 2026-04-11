@@ -87,10 +87,11 @@ function init() {
     handleSlash(name: string, args: string): boolean {
       for (const option of entries()) {
         const slash = option.slash
-        if (!slash || !option.onSlashSubmit) continue
-        if (slash.name === name || slash.aliases?.includes(name)) {
-          return option.onSlashSubmit(args)
-        }
+        if (!slash) continue
+        if (slash.name !== name && !slash.aliases?.includes(name)) continue
+        if (option.onSlashSubmit) return option.onSlashSubmit(args)
+        option.onSelect?.(dialog)
+        return true
       }
       return false
     },
