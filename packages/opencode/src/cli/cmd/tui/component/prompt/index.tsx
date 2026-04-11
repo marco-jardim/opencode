@@ -221,25 +221,29 @@ export function Prompt(props: PromptProps) {
     const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
     const ctxLimit = model?.limit.context
     const pctNum = ctxLimit ? Math.min(100, Math.round((tokens / ctxLimit) * 100)) : undefined
-    const pct = pctNum !== undefined ? `${pctNum}%` : undefined
-    const cacheRead = last.tokens.cache.read
-    const cacheWrite = last.tokens.cache.write
-    const cacheTotal = cacheRead + cacheWrite
-    const hasCache = cacheTotal > 0
-    const cacheHitRate = hasCache ? Math.round((cacheRead / (last.tokens.input + cacheTotal)) * 100) : undefined
 
-    const turnIn = last.tokens.input + cacheRead + cacheWrite
+    const cacheRead = last.tokens.cache.read
+    const turnIn = last.tokens.input + cacheRead + last.tokens.cache.write
     const turnOut = last.tokens.output + last.tokens.reasoning
+    const hitSuffix = cacheRead > 0 ? ` (${formatTokens(cacheRead)} hit)` : ""
 
     const sessionIn = all.reduce((sum, m) => sum + m.tokens.input + m.tokens.cache.read + m.tokens.cache.write, 0)
     const sessionOut = all.reduce((sum, m) => sum + m.tokens.output + m.tokens.reasoning, 0)
+    const sessionHitRate = (() => {
+      const total = all.reduce((s, m) => s + m.tokens.input + m.tokens.cache.read + m.tokens.cache.write, 0)
+      const reads = all.reduce((s, m) => s + m.tokens.cache.read, 0)
+      return total > 0 ? Math.round((reads / total) * 100) : undefined
+    })()
+
+    const ctxStr = ctxLimit
+      ? `🧠 ${formatTokens(tokens)}/${formatTokens(ctxLimit)} (${pctNum}%)`
+      : `🧠 ${formatTokens(tokens)}`
 
     return {
-      context: pct ? `${formatTokens(tokens)} (${pct})` : formatTokens(tokens),
-      cacheHitRate: cacheHitRate !== undefined ? `${cacheHitRate}%` : undefined,
-      cacheRW: hasCache ? `${formatTokens(cacheRead)}/${formatTokens(cacheWrite)}` : undefined,
-      turn: `↑${formatTokens(turnIn)} ↓${formatTokens(turnOut)}`,
+      turn: `↑${formatTokens(turnIn)}${hitSuffix} ↓${formatTokens(turnOut)}`,
       session: `Σ ↑${formatTokens(sessionIn)} ↓${formatTokens(sessionOut)}`,
+      sessionHitRate: sessionHitRate !== undefined ? `💾${sessionHitRate}%` : undefined,
+      context: ctxStr,
     }
   })
 
@@ -1329,14 +1333,13 @@ export function Prompt(props: PromptProps) {
                         <text fg={theme.textMuted} wrapMode="none">
                           {[
                             turnElapsed() || undefined,
-                            compactionCount() > 0 ? `📦${compactionCount()}` : undefined,
+                            tps() ? `${tps()!.live ? "⚡" : "≈"}${tps()!.value}t/s` : undefined,
                             turnToolCount() > 0 ? `🔧${turnToolCount()}` : undefined,
-                            `🧠 ${item().context}`,
-                            item().cacheHitRate ? `💾 ${item().cacheHitRate}` : undefined,
-                            item().cacheRW ? `↕ ${item().cacheRW}` : undefined,
                             item().turn,
                             item().session,
-                            tps() ? `${tps()!.live ? "⚡" : "≈"}${tps()!.value}t/s` : undefined,
+                            item().sessionHitRate,
+                            compactionCount() > 0 ? `📦${compactionCount()}` : undefined,
+                            item().context,
                           ]
                             .filter(Boolean)
                             .join(" · ")}
