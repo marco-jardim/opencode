@@ -361,7 +361,7 @@ export namespace SessionProcessor {
                 usage: value.usage,
                 metadata: value.providerMetadata,
               })
-              yield* log.info("usage", {
+              slog.info("usage", {
                 input: usage.tokens.input,
                 output: usage.tokens.output,
                 reasoning: usage.tokens.reasoning,
