@@ -1,4 +1,4 @@
-import type { NamedError } from "@opencode-ai/util/error"
+import type { NamedError } from "@opencode-ai/shared/util/error"
 import { Cause, Clock, Duration, Effect, Schedule } from "effect"
 import { MessageV2 } from "./message-v2"
 import { iife } from "@/util/iife"
@@ -68,7 +68,9 @@ export namespace SessionRetry {
       const status = error.data.statusCode
       if (status === 401 || status === 403) return undefined
       if (status === 402) return undefined
-      if (!error.data.isRetryable) return undefined
+      // 5xx errors are transient server failures and should always be retried,
+      // even when the provider SDK doesn't explicitly mark them as retryable.
+      if (!error.data.isRetryable && !(status !== undefined && status >= 500)) return undefined
       if (error.data.responseBody?.includes("FreeUsageLimitError")) return GO_UPSELL_MESSAGE
       return error.data.message.includes("Overloaded") ? "Provider is overloaded" : error.data.message
     }
