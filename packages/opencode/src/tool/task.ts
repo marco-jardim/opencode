@@ -7,7 +7,6 @@ import { MessageV2 } from "../session/message-v2"
 import { Agent } from "../agent/agent"
 import type { SessionPrompt } from "../session/prompt"
 import { Config } from "../config"
-import { Permission } from "@/permission"
 import { Log } from "@/util"
 import { Effect } from "effect"
 
