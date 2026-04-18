@@ -239,7 +239,22 @@ When constructing the summary, try to stick to this template:
       const prompt = compacting.prompt ?? [defaultPrompt, ...compacting.context].join("\n\n")
       const msgs = structuredClone(messages)
       yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
-      const modelMessages = yield* MessageV2.toModelMessagesEffect(msgs, model, { stripMedia: true })
+
+      // Let plugins generate the summary themselves (e.g. via Haiku) and
+      // skip opencode's internal model call entirely. Returning output.summary
+      // short-circuits; otherwise we fall through to the model-based path.
+      const summarize = yield* plugin.trigger(
+        "experimental.session.summarize",
+        { sessionID: input.sessionID, messages: msgs, model },
+        {
+          summary: undefined as string | undefined,
+          modelID: undefined as string | undefined,
+          providerID: undefined as string | undefined,
+          tokens: undefined as { input: number; output: number } | undefined,
+          cost: undefined as number | undefined,
+        },
+      )
+
       const ctx = yield* InstanceState.context
       const msg: MessageV2.Assistant = {
         id: MessageID.ascending(),
@@ -254,20 +269,41 @@ When constructing the summary, try to stick to this template:
           cwd: ctx.directory,
           root: ctx.worktree,
         },
-        cost: 0,
+        cost: summarize.summary ? (summarize.cost ?? 0) : 0,
         tokens: {
-          output: 0,
-          input: 0,
+          output: summarize.summary && summarize.tokens ? summarize.tokens.output : 0,
+          input: summarize.summary && summarize.tokens ? summarize.tokens.input : 0,
           reasoning: 0,
           cache: { read: 0, write: 0 },
         },
-        modelID: model.id,
-        providerID: model.providerID,
+        modelID: summarize.summary ? (summarize.modelID ?? model.id) : model.id,
+        providerID: summarize.summary ? (summarize.providerID ?? model.providerID) : model.providerID,
         time: {
           created: Date.now(),
         },
       }
       yield* session.updateMessage(msg)
+
+      if (summarize.summary) {
+        // Plugin produced the summary — persist it as a text part and finalize
+        // the message without calling the processor (no main-model token cost).
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          messageID: msg.id,
+          sessionID: input.sessionID,
+          type: "text",
+          text: summarize.summary,
+          synthetic: true,
+          time: { start: Date.now(), end: Date.now() },
+        })
+        msg.finish = "stop"
+        msg.time.completed = Date.now()
+        yield* session.updateMessage(msg)
+        yield* bus.publish(Event.Compacted, { sessionID: input.sessionID })
+        return "continue"
+      }
+
+      const modelMessages = yield* MessageV2.toModelMessagesEffect(msgs, model, { stripMedia: true })
       const processor = yield* processors.create({
         assistantMessage: msg,
         sessionID: input.sessionID,

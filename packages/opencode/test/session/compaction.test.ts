@@ -1197,6 +1197,86 @@ describe("session.compaction.process", () => {
   })
 })
 
+function pluginWithSummarize(summary: string) {
+  return Layer.mock(Plugin.Service)({
+    trigger: <Name extends string, Input, Output>(name: Name, _input: Input, output: Output) => {
+      if (name === "experimental.session.summarize") {
+        return Effect.sync(() => {
+          ;(output as {
+            summary?: string
+            modelID?: string
+            providerID?: string
+            tokens?: { input: number; output: number }
+            cost?: number
+          }).summary = summary
+          ;(output as { modelID?: string }).modelID = "claude-haiku-4-5-20251001"
+          ;(output as { providerID?: string }).providerID = "anthropic"
+          ;(output as { tokens?: { input: number; output: number } }).tokens = {
+            input: 1234,
+            output: 567,
+          }
+          ;(output as { cost?: number }).cost = 0.00123
+          return output
+        })
+      }
+      return Effect.succeed(output)
+    },
+    list: () => Effect.succeed([]),
+    init: () => Effect.void,
+  })
+}
+
+describe("session.compaction.process — plugin-provided summary", () => {
+  test("uses plugin summary when experimental.session.summarize returns one", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const session = await svc.create({})
+        const msg = await user(session.id, "hello")
+        const msgs = await svc.messages({ sessionID: session.id })
+        const rt = runtime("continue", pluginWithSummarize("PLUGIN_SUMMARY_XYZ"), wide())
+        try {
+          const result = await rt.runPromise(
+            SessionCompaction.Service.use((svc) =>
+              svc.process({
+                parentID: msg.id,
+                messages: msgs,
+                sessionID: session.id,
+                auto: false,
+              }),
+            ),
+          )
+
+          expect(result).toBe("continue")
+          const after = await svc.messages({ sessionID: session.id })
+          const compactionMsg = after.find(
+            (m) => m.info.role === "assistant" && m.info.summary === true,
+          )
+          expect(compactionMsg).toBeTruthy()
+          if (compactionMsg!.info.role === "assistant") {
+            expect(compactionMsg!.info.modelID).toBe("claude-haiku-4-5-20251001")
+            expect(compactionMsg!.info.providerID).toBe("anthropic")
+            expect(compactionMsg!.info.tokens.input).toBe(1234)
+            expect(compactionMsg!.info.tokens.output).toBe(567)
+            expect(compactionMsg!.info.cost).toBe(0.00123)
+            expect(compactionMsg!.info.finish).toBe("stop")
+            expect(compactionMsg!.info.time.completed).toBeGreaterThan(0)
+          }
+          const textPart = compactionMsg!.parts.find((p) => p.type === "text")
+          expect(textPart).toBeTruthy()
+          if (textPart && textPart.type === "text") {
+            expect(textPart.text).toBe("PLUGIN_SUMMARY_XYZ")
+            expect(textPart.synthetic).toBe(true)
+          }
+        } finally {
+          await rt.dispose()
+        }
+      },
+    })
+  })
+})
+
 describe("util.token.estimate", () => {
   test("estimates tokens from text (4 chars per token)", () => {
     const text = "x".repeat(4000)
