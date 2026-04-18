@@ -640,16 +640,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
     return { type: "json", value: output as never }
   }
 
-  // #4 Token economy: evict file-read tool results that are more than
-  // STALE_READ_THRESHOLD messages in the past. The model has already seen
-  // the content and acted on it — keeping the full payload in the context
-  // window just burns tokens on every subsequent turn. If the model needs
-  // the file again it will re-read it.
-  const STALE_READ_THRESHOLD = 10
-  const staleCutoff = input.length - STALE_READ_THRESHOLD
-  let msgIdx = -1
   for (const msg of input) {
-    msgIdx++
     if (msg.parts.length === 0) continue
 
     if (msg.info.role === "user") {
@@ -729,21 +720,8 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
         if (part.type === "tool") {
           toolNames.add(part.tool)
           if (part.state.status === "completed") {
-            // #4 Stale-read eviction: if this is a read-class tool result
-            // from a message older than STALE_READ_THRESHOLD turns ago,
-            // replace the body with a placeholder. Saves ~1-2KB per old
-            // read × conversation depth.
-            const isStaleRead =
-              !part.state.time.compacted &&
-              (part.tool === "read" || part.tool === "view") &&
-              msgIdx < staleCutoff
-            const outputText = part.state.time.compacted
-              ? "[Old tool result content cleared]"
-              : isStaleRead
-                ? "[File was read earlier in this session — re-read if you need the current contents]"
-                : part.state.output
-            const attachments =
-              part.state.time.compacted || isStaleRead || options?.stripMedia ? [] : (part.state.attachments ?? [])
+            const outputText = part.state.time.compacted ? "[Old tool result content cleared]" : part.state.output
+            const attachments = part.state.time.compacted || options?.stripMedia ? [] : (part.state.attachments ?? [])
 
             // For providers that don't support media in tool results, extract media files
             // (images, PDFs) to be sent as a separate user message
