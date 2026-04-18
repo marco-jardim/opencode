@@ -269,15 +269,15 @@ When constructing the summary, try to stick to this template:
           cwd: ctx.directory,
           root: ctx.worktree,
         },
-        cost: summarize.summary ? (summarize.cost ?? 0) : 0,
+        cost: 0,
         tokens: {
-          output: summarize.summary && summarize.tokens ? summarize.tokens.output : 0,
-          input: summarize.summary && summarize.tokens ? summarize.tokens.input : 0,
+          output: 0,
+          input: 0,
           reasoning: 0,
           cache: { read: 0, write: 0 },
         },
-        modelID: summarize.summary ? (summarize.modelID ?? model.id) : model.id,
-        providerID: summarize.summary ? (summarize.providerID ?? model.providerID) : model.providerID,
+        modelID: model.id,
+        providerID: model.providerID,
         time: {
           created: Date.now(),
         },
@@ -296,6 +296,13 @@ When constructing the summary, try to stick to this template:
           synthetic: true,
           time: { start: Date.now(), end: Date.now() },
         })
+        if (summarize.cost !== undefined) msg.cost = summarize.cost
+        if (summarize.tokens) {
+          msg.tokens.input = summarize.tokens.input
+          msg.tokens.output = summarize.tokens.output
+        }
+        if (summarize.modelID) msg.modelID = summarize.modelID
+        if (summarize.providerID) msg.providerID = summarize.providerID
         msg.finish = "stop"
         msg.time.completed = Date.now()
         yield* session.updateMessage(msg)

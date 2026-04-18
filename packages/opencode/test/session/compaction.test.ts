@@ -1235,7 +1235,78 @@ describe("session.compaction.process — plugin-provided summary", () => {
         const session = await svc.create({})
         const msg = await user(session.id, "hello")
         const msgs = await svc.messages({ sessionID: session.id })
+        const done = defer()
+        let seen = false
         const rt = runtime("continue", pluginWithSummarize("PLUGIN_SUMMARY_XYZ"), wide())
+        let unsub: (() => void) | undefined
+        try {
+          unsub = await rt.runPromise(
+            Bus.Service.use((svc) =>
+              svc.subscribeCallback(SessionCompaction.Event.Compacted, (evt) => {
+                if (evt.properties.sessionID !== session.id) return
+                seen = true
+                done.resolve()
+              }),
+            ),
+          )
+
+          const result = await rt.runPromise(
+            SessionCompaction.Service.use((svc) =>
+              svc.process({
+                parentID: msg.id,
+                messages: msgs,
+                sessionID: session.id,
+                auto: false,
+              }),
+            ),
+          )
+
+          await Promise.race([
+            done.promise,
+            wait(500).then(() => {
+              throw new Error("timed out waiting for compacted event")
+            }),
+          ])
+
+          expect(result).toBe("continue")
+          const after = await svc.messages({ sessionID: session.id })
+          const compactionMsg = after.find(
+            (m) => m.info.role === "assistant" && m.info.summary === true,
+          )
+          expect(compactionMsg).toBeTruthy()
+          if (compactionMsg!.info.role === "assistant") {
+            expect(compactionMsg!.info.modelID).toBe("claude-haiku-4-5-20251001")
+            expect(compactionMsg!.info.providerID).toBe("anthropic")
+            expect(compactionMsg!.info.tokens.input).toBe(1234)
+            expect(compactionMsg!.info.tokens.output).toBe(567)
+            expect(compactionMsg!.info.cost).toBe(0.00123)
+            expect(compactionMsg!.info.finish).toBe("stop")
+            expect(compactionMsg!.info.time.completed).toBeGreaterThan(Date.now() - 5000)
+          }
+          const textPart = compactionMsg!.parts.find((p) => p.type === "text")
+          expect(textPart).toBeTruthy()
+          if (textPart && textPart.type === "text") {
+            expect(textPart.text).toBe("PLUGIN_SUMMARY_XYZ")
+            expect(textPart.synthetic).toBe(true)
+          }
+          expect(seen).toBe(true)
+        } finally {
+          unsub?.()
+          await rt.dispose()
+        }
+      },
+    })
+  })
+
+  test("falls through to processor when summarize hook returns empty summary", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const session = await svc.create({})
+        const msg = await user(session.id, "hello")
+        const msgs = await svc.messages({ sessionID: session.id })
+        const rt = runtime("continue", pluginWithSummarize(""), wide())
         try {
           const result = await rt.runPromise(
             SessionCompaction.Service.use((svc) =>
@@ -1255,20 +1326,13 @@ describe("session.compaction.process — plugin-provided summary", () => {
           )
           expect(compactionMsg).toBeTruthy()
           if (compactionMsg!.info.role === "assistant") {
-            expect(compactionMsg!.info.modelID).toBe("claude-haiku-4-5-20251001")
-            expect(compactionMsg!.info.providerID).toBe("anthropic")
-            expect(compactionMsg!.info.tokens.input).toBe(1234)
-            expect(compactionMsg!.info.tokens.output).toBe(567)
-            expect(compactionMsg!.info.cost).toBe(0.00123)
-            expect(compactionMsg!.info.finish).toBe("stop")
-            expect(compactionMsg!.info.time.completed).toBeGreaterThan(0)
+            expect(compactionMsg!.info.modelID).toBe("test-model")
+            expect(compactionMsg!.info.providerID).toBe("test")
+            expect(compactionMsg!.info.cost).toBe(0)
+            expect(compactionMsg!.info.tokens.input).toBe(0)
+            expect(compactionMsg!.info.tokens.output).toBe(0)
           }
-          const textPart = compactionMsg!.parts.find((p) => p.type === "text")
-          expect(textPart).toBeTruthy()
-          if (textPart && textPart.type === "text") {
-            expect(textPart.text).toBe("PLUGIN_SUMMARY_XYZ")
-            expect(textPart.synthetic).toBe(true)
-          }
+          expect(compactionMsg!.parts.filter((p) => p.type === "text").length).toBe(0)
         } finally {
           await rt.dispose()
         }
