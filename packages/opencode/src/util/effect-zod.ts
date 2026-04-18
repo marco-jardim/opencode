@@ -16,11 +16,32 @@ function walk(ast: SchemaAST.AST): z.ZodTypeAny {
   const override = (ast.annotations as any)?.[ZodOverride] as z.ZodTypeAny | undefined
   if (override) return override
 
-  const out = body(ast)
+  let out = body(ast)
+  for (const check of ast.checks ?? []) {
+    out = applyCheck(out, check, ast)
+  }
   const desc = SchemaAST.resolveDescription(ast)
   const ref = SchemaAST.resolveIdentifier(ast)
   const next = desc ? out.describe(desc) : out
   return ref ? next.meta({ ref }) : next
+}
+
+function applyCheck(out: z.ZodTypeAny, check: SchemaAST.Check<any>, ast: SchemaAST.AST): z.ZodTypeAny {
+  if (check._tag === "FilterGroup") {
+    return check.checks.reduce((acc, sub) => applyCheck(acc, sub, ast), out)
+  }
+  return out.superRefine((value, ctx) => {
+    const issue = check.run(value, ast, {} as any)
+    if (!issue) return
+    const message = issueMessage(issue) ?? (check.annotations as any)?.message ?? "Validation failed"
+    ctx.addIssue({ code: "custom", message })
+  })
+}
+
+function issueMessage(issue: any): string | undefined {
+  if (typeof issue?.annotations?.message === "string") return issue.annotations.message
+  if (typeof issue?.message === "string") return issue.message
+  return undefined
 }
 
 function body(ast: SchemaAST.AST): z.ZodTypeAny {
@@ -77,8 +98,8 @@ function union(ast: SchemaAST.Union): z.ZodTypeAny {
   if (items.length === 1) return items[0]
   if (items.length < 2) return fail(ast)
 
-  const discriminator = (ast as any).annotations?.discriminator
-  if (discriminator) {
+  const discriminator = ast.annotations?.discriminator
+  if (typeof discriminator === "string") {
     return z.discriminatedUnion(discriminator, items as [z.ZodObject<any>, z.ZodObject<any>, ...z.ZodObject<any>[]])
   }
 
@@ -86,21 +107,40 @@ function union(ast: SchemaAST.Union): z.ZodTypeAny {
 }
 
 function object(ast: SchemaAST.Objects): z.ZodTypeAny {
+  // Pure record: { [k: string]: V }
   if (ast.propertySignatures.length === 0 && ast.indexSignatures.length === 1) {
     const sig = ast.indexSignatures[0]
     if (sig.parameter._tag !== "String") return fail(ast)
     return z.record(z.string(), walk(sig.type))
   }
 
-  if (ast.indexSignatures.length > 0) return fail(ast)
+  // Pure object with known fields and no index signatures.
+  if (ast.indexSignatures.length === 0) {
+    return z.object(Object.fromEntries(ast.propertySignatures.map((sig) => [String(sig.name), walk(sig.type)])))
+  }
 
-  return z.object(Object.fromEntries(ast.propertySignatures.map((sig) => [String(sig.name), walk(sig.type)])))
+  // Struct with a catchall (StructWithRest): known fields + index signature.
+  // Only supports a single string-keyed index signature; multi-signature or
+  // symbol/number keys fall through to fail.
+  if (ast.indexSignatures.length !== 1) return fail(ast)
+  const sig = ast.indexSignatures[0]
+  if (sig.parameter._tag !== "String") return fail(ast)
+  return z
+    .object(Object.fromEntries(ast.propertySignatures.map((p) => [String(p.name), walk(p.type)])))
+    .catchall(walk(sig.type))
 }
 
 function array(ast: SchemaAST.Arrays): z.ZodTypeAny {
-  if (ast.elements.length > 0) return fail(ast)
-  if (ast.rest.length !== 1) return fail(ast)
-  return z.array(walk(ast.rest[0]))
+  // Pure variadic arrays: { elements: [], rest: [item] }
+  if (ast.elements.length === 0) {
+    if (ast.rest.length !== 1) return fail(ast)
+    return z.array(walk(ast.rest[0]))
+  }
+  // Fixed-length tuples: { elements: [a, b, ...], rest: [] }
+  // Tuples with a variadic tail (...rest) are not yet supported.
+  if (ast.rest.length > 0) return fail(ast)
+  const items = ast.elements.map(walk)
+  return z.tuple(items as [z.ZodTypeAny, ...Array<z.ZodTypeAny>])
 }
 
 function decl(ast: SchemaAST.Declaration): z.ZodTypeAny {
