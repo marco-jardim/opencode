@@ -1487,7 +1487,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             const isSubagent = agent.mode === "subagent"
             const [skills, env, instructions, modelMsgs] = yield* Effect.all([
               isSubagent ? Effect.succeed(undefined as string | undefined) : sys.skills(agent),
-              isSubagent ? Effect.succeed([] as string[]) : Effect.sync(() => sys.environment(model)),
+              isSubagent ? Effect.succeed([] as string[]) : Effect.sync(() => sys.environmentForSession(sessionID, model)),
               instruction.system().pipe(Effect.orDie),
               MessageV2.toModelMessagesEffect(msgs, model),
             ])
