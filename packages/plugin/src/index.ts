@@ -305,6 +305,39 @@ export interface Hooks {
     output: { context: string[]; prompt?: string },
   ) => Promise<void>
   /**
+   * Called during session compaction, after `experimental.session.compacting`
+   * (which allows prompt customization). Allows plugins to generate the
+   * summary themselves — typically using a smaller, cheaper model — and
+   * bypass opencode's internal model-based summarization.
+   *
+   * - `input.messages`: full message history of the session (post-transform)
+   * - `input.model`: the model opencode would have used for summarization
+   *
+   * - `output.summary`: if set, opencode uses this string as the compaction
+   *   summary and SKIPS its own model call entirely. If unset/empty, opencode
+   *   falls through to its normal model-based summarization path.
+   * - `output.modelID` / `output.providerID`: informational — the model/provider
+   *   the plugin actually used. Stored on the compaction assistant message.
+   * - `output.tokens` / `output.cost`: informational — for accounting display.
+   */
+  "experimental.session.summarize"?: (
+    input: {
+      sessionID: string
+      messages: {
+        info: Message
+        parts: Part[]
+      }[]
+      model: Model
+    },
+    output: {
+      summary?: string
+      modelID?: string
+      providerID?: string
+      tokens?: { input: number; output: number }
+      cost?: number
+    },
+  ) => Promise<void>
+  /**
    * Called after compaction succeeds and before a synthetic user
    * auto-continue message is added.
    *
