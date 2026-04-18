@@ -209,6 +209,14 @@ export const Info = z
           .min(0)
           .optional()
           .describe("Token buffer for compaction. Leaves enough window to avoid overflow during compaction."),
+        threshold: z
+          .number()
+          .min(0)
+          .max(1)
+          .optional()
+          .describe(
+            "Fraction (0-1] of usable context at which auto-compaction triggers. Default 1.0 (at overflow). Recommended 0.85 to compact before cost spikes.",
+          ),
       })
       .optional(),
     experimental: z
