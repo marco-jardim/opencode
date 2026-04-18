@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { Effect } from "effect"
+import { Bus } from "../../src/bus"
 import { Instance } from "../../src/project/instance"
 import type { Provider } from "../../src/provider"
+import { Event as SessionEvent } from "../../src/session/session"
 import { SessionID } from "../../src/session/schema"
 import { SystemPrompt } from "../../src/session/system"
 import { tmpdir } from "../fixture/fixture"
@@ -163,6 +165,54 @@ describe("session.system env snapshot", () => {
         expect(secondEnv.some((s) => s.includes(`Today's date: ${oldDateStr}`))).toBe(false)
         // And must be a fresh array reference
         expect(secondEnv).not.toBe(firstEnv)
+      },
+    })
+  })
+
+  test("Session.Event.Deleted purges the cached env snapshot", async () => {
+    await using tmp = await tmpdir({ git: true })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const model = fakeModel()
+        const sessionID = SessionID.descending()
+
+        const program = Effect.gen(function* () {
+          const svc = yield* SystemPrompt.Service
+          const bus = yield* Bus.Service
+
+          // Let the layer's bus subscription finish wiring up before we
+          // publish — forkScoped returns before the first runForEach pull.
+          yield* Effect.sleep("20 millis")
+
+          const before = svc.environmentForSession(sessionID, model)
+          const cachedHit = svc.environmentForSession(sessionID, model)
+
+          // Publish the deletion event and yield long enough for the
+          // bus subscriber forked inside the layer to process it.
+          yield* bus.publish(SessionEvent.Deleted, {
+            sessionID,
+            info: {
+              id: sessionID,
+              title: "",
+              version: "",
+              time: { created: 0, updated: 0 },
+              revert: undefined,
+            } as unknown as SessionEvent.Deleted.Type["info"],
+          } as unknown as SessionEvent.Deleted.Type)
+          yield* Effect.sleep("20 millis")
+
+          const after = svc.environmentForSession(sessionID, model)
+          return { before, cachedHit, after }
+        }).pipe(Effect.provide(SystemPrompt.defaultLayer))
+
+        const { before, cachedHit, after } = await Effect.runPromise(program)
+
+        // Sanity check — cache was populated pre-delete
+        expect(cachedHit).toBe(before)
+        // Post-delete call must produce a new array reference (fresh build)
+        expect(after).not.toBe(before)
       },
     })
   })

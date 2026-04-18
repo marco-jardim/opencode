@@ -1,4 +1,4 @@
-import { Context, Effect, Layer } from "effect"
+import { Context, Effect, Layer, Stream } from "effect"
 
 import { Instance } from "../project/instance"
 
@@ -15,7 +15,9 @@ import type { Provider } from "@/provider"
 import type { Agent } from "@/agent/agent"
 import { Permission } from "@/permission"
 import { Skill } from "@/skill"
+import { Bus } from "@/bus"
 import type { SessionID } from "./schema"
+import { Event as SessionEvent } from "./session"
 
 export function provider(model: Provider.Model) {
   if (model.api.id.includes("gpt-4") || model.api.id.includes("o1") || model.api.id.includes("o3"))
@@ -66,11 +68,19 @@ export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const skill = yield* Skill.Service
+    const bus = yield* Bus.Service
 
     // Session-keyed env snapshot cache. Keeps the env preamble stable for
     // the lifetime of a session so date/branch/etc don't invalidate the
     // provider-side prompt cache mid-session.
     const envCache = new Map<SessionID, string[]>()
+
+    // Purge the cached env snapshot when a session is deleted so the map
+    // does not grow unbounded across long-lived instances.
+    yield* bus.subscribe(SessionEvent.Deleted).pipe(
+      Stream.runForEach((evt) => Effect.sync(() => envCache.delete(evt.properties.sessionID))),
+      Effect.forkScoped,
+    )
 
     function buildEnv(model: Provider.Model): string[] {
       const project = Instance.project
@@ -123,6 +133,6 @@ export const layer = Layer.effect(
   }),
 )
 
-export const defaultLayer = layer.pipe(Layer.provide(Skill.defaultLayer))
+export const defaultLayer = layer.pipe(Layer.provideMerge(Skill.defaultLayer), Layer.provideMerge(Bus.defaultLayer))
 
 export * as SystemPrompt from "./system"
