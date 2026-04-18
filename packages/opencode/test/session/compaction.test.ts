@@ -1275,8 +1275,8 @@ describe("session.compaction.process — plugin-provided summary", () => {
           )
           expect(compactionMsg).toBeTruthy()
           if (compactionMsg!.info.role === "assistant") {
-            expect(compactionMsg!.info.modelID).toBe("claude-haiku-4-5-20251001")
-            expect(compactionMsg!.info.providerID).toBe("anthropic")
+            expect(compactionMsg!.info.modelID as string).toBe("claude-haiku-4-5-20251001")
+            expect(compactionMsg!.info.providerID as string).toBe("anthropic")
             expect(compactionMsg!.info.tokens.input).toBe(1234)
             expect(compactionMsg!.info.tokens.output).toBe(567)
             expect(compactionMsg!.info.cost).toBe(0.00123)
@@ -1326,8 +1326,8 @@ describe("session.compaction.process — plugin-provided summary", () => {
           )
           expect(compactionMsg).toBeTruthy()
           if (compactionMsg!.info.role === "assistant") {
-            expect(compactionMsg!.info.modelID).toBe("test-model")
-            expect(compactionMsg!.info.providerID).toBe("test")
+            expect(compactionMsg!.info.modelID as string).toBe("test-model")
+            expect(compactionMsg!.info.providerID as string).toBe("test")
             expect(compactionMsg!.info.cost).toBe(0)
             expect(compactionMsg!.info.tokens.input).toBe(0)
             expect(compactionMsg!.info.tokens.output).toBe(0)

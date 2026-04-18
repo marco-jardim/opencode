@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { Effect } from "effect"
+import z from "zod"
 import { Bus } from "../../src/bus"
 import { Instance } from "../../src/project/instance"
 import type { Provider } from "../../src/provider"
@@ -199,8 +200,8 @@ describe("session.system env snapshot", () => {
               version: "",
               time: { created: 0, updated: 0 },
               revert: undefined,
-            } as unknown as SessionEvent.Deleted.Type["info"],
-          } as unknown as SessionEvent.Deleted.Type)
+            } as unknown as z.infer<typeof SessionEvent.Deleted.schema>["info"],
+          } as unknown as z.infer<typeof SessionEvent.Deleted.schema>)
           yield* Effect.sleep("20 millis")
 
           const after = svc.environmentForSession(sessionID, model)

@@ -301,8 +301,8 @@ When constructing the summary, try to stick to this template:
           msg.tokens.input = summarize.tokens.input
           msg.tokens.output = summarize.tokens.output
         }
-        if (summarize.modelID) msg.modelID = summarize.modelID
-        if (summarize.providerID) msg.providerID = summarize.providerID
+        if (summarize.modelID) msg.modelID = summarize.modelID as ModelID
+        if (summarize.providerID) msg.providerID = summarize.providerID as ProviderID
         msg.finish = "stop"
         msg.time.completed = Date.now()
         yield* session.updateMessage(msg)
