@@ -29,21 +29,8 @@ export const Event = {
 }
 
 export const PRUNE_MINIMUM = 20_000
-/** Protect the most recent N tokens from REPRODUCIBLE tool outputs (re-runnable
- *  searches/reads). Lower threshold = more aggressive pruning. */
-export const PRUNE_PROTECT_REPRODUCIBLE = 10_000
-/** Protect the most recent N tokens from STATEFUL tool outputs (executed
- *  commands, applied edits, written files). Higher threshold = keep more. */
-export const PRUNE_PROTECT_STATEFUL = 40_000
+export const PRUNE_PROTECT = 40_000
 const PRUNE_PROTECTED_TOOLS = ["skill"]
-
-/** Tool outputs that are trivially re-runnable (idempotent + cheap). */
-const REPRODUCIBLE_TOOLS = new Set(["read", "grep", "glob", "ls", "list", "find"])
-
-function pruneProtectFor(toolName: string): number {
-  const normalized = toolName.toLowerCase()
-  return REPRODUCIBLE_TOOLS.has(normalized) ? PRUNE_PROTECT_REPRODUCIBLE : PRUNE_PROTECT_STATEFUL
-}
 
 export interface Interface {
   readonly isOverflow: (input: {
@@ -97,9 +84,8 @@ export const layer: Layer.Layer<
       return overflow({ cfg: yield* config.get(), tokens: input.tokens, model: input.model })
     })
 
-    // goes backwards through parts, protecting the newest tool outputs per tool
-    // class (reproducible vs. stateful) and erasing older tool outputs to free
-    // context space.
+    // goes backwards through parts until there are PRUNE_PROTECT tokens worth of tool
+    // calls, then erases output of older tool calls to free context space
     const prune = Effect.fn("SessionCompaction.prune")(function* (input: { sessionID: SessionID }) {
       const cfg = yield* config.get()
       if (cfg.compaction?.prune === false) return
@@ -110,8 +96,7 @@ export const layer: Layer.Layer<
         .pipe(Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed(undefined)))
       if (!msgs) return
 
-      let totalReproducible = 0
-      let totalStateful = 0
+      let total = 0
       let pruned = 0
       const toPrune: MessageV2.ToolPart[] = []
       let turns = 0
@@ -128,25 +113,16 @@ export const layer: Layer.Layer<
               if (PRUNE_PROTECTED_TOOLS.includes(part.tool)) continue
               if (part.state.time.compacted) break loop
               const estimate = Token.estimate(part.state.output)
-              const protect = pruneProtectFor(part.tool)
-              if (protect === PRUNE_PROTECT_REPRODUCIBLE) {
-                totalReproducible += estimate
-                if (totalReproducible > PRUNE_PROTECT_REPRODUCIBLE) {
-                  pruned += estimate
-                  toPrune.push(part)
-                }
-              } else {
-                totalStateful += estimate
-                if (totalStateful > PRUNE_PROTECT_STATEFUL) {
-                  pruned += estimate
-                  toPrune.push(part)
-                }
+              total += estimate
+              if (total > PRUNE_PROTECT) {
+                pruned += estimate
+                toPrune.push(part)
               }
             }
         }
       }
 
-      log.info("found", { pruned, totalReproducible, totalStateful })
+      log.info("found", { pruned, total })
       if (pruned > PRUNE_MINIMUM) {
         for (const part of toPrune) {
           if (part.state.status === "completed") {
