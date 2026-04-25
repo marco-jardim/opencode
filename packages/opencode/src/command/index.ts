@@ -4,7 +4,7 @@ import { InstanceState } from "@/effect"
 import { EffectBridge } from "@/effect"
 import type { InstanceContext } from "@/project/instance"
 import { SessionID, MessageID } from "@/session/schema"
-import { Effect, Layer, Context } from "effect"
+import { Effect, Layer, Context, Schema } from "effect"
 import z from "zod"
 import { Config } from "../config"
 import { ConfigMarkdown } from "../config"
@@ -27,11 +27,11 @@ type State = {
 export const Event = {
   Executed: BusEvent.define(
     "command.executed",
-    z.object({
-      name: z.string(),
-      sessionID: SessionID.zod,
-      arguments: z.string(),
-      messageID: MessageID.zod,
+    Schema.Struct({
+      name: Schema.String,
+      sessionID: SessionID,
+      arguments: Schema.String,
+      messageID: MessageID,
     }),
   ),
 }
