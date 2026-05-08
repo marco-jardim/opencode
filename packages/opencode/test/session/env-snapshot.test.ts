@@ -2,12 +2,11 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { Effect } from "effect"
 import z from "zod"
 import { Bus } from "../../src/bus"
-import { Instance } from "../../src/project/instance"
 import type { Provider } from "../../src/provider/provider"
 import { Event as SessionEvent } from "../../src/session/session"
 import { SessionID } from "../../src/session/schema"
 import { SystemPrompt } from "../../src/session/system"
-import { tmpdir } from "../fixture/fixture"
+import { provideTestInstance, tmpdir } from "../fixture/fixture"
 
 function fakeModel(): Provider.Model {
   return {
@@ -68,7 +67,7 @@ describe("session.system env snapshot", () => {
   test("memoizes env array per sessionID; fresh array for different sessionID", async () => {
     await using tmp = await tmpdir({ git: true })
 
-    await Instance.provide({
+    await provideTestInstance({
       directory: tmp.path,
       fn: async () => {
         const model = fakeModel()
@@ -77,9 +76,9 @@ describe("session.system env snapshot", () => {
 
         const run = Effect.gen(function* () {
           const svc = yield* SystemPrompt.Service
-          const first = svc.environmentForSession(sessionA, model)
-          const second = svc.environmentForSession(sessionA, model)
-          const other = svc.environmentForSession(sessionB, model)
+          const first = yield* svc.environmentForSession(sessionA, model)
+          const second = yield* svc.environmentForSession(sessionA, model)
+          const other = yield* svc.environmentForSession(sessionB, model)
           return { first, second, other }
         }).pipe(Effect.provide(SystemPrompt.defaultLayer))
 
@@ -98,7 +97,7 @@ describe("session.system env snapshot", () => {
   test("date stays stable across calls even if real date advances", async () => {
     await using tmp = await tmpdir({ git: true })
 
-    await Instance.provide({
+    await provideTestInstance({
       directory: tmp.path,
       fn: async () => {
         const model = fakeModel()
@@ -108,12 +107,14 @@ describe("session.system env snapshot", () => {
         // Service instance (same cache). Date is swapped between calls.
         const program = Effect.gen(function* () {
           const svc = yield* SystemPrompt.Service
-          const firstEnv = withMockedDate("2026-04-18T10:00:00.000Z", () =>
+          const firstEnvEffect = withMockedDate("2026-04-18T10:00:00.000Z", () =>
             svc.environmentForSession(sessionID, model),
           )
-          const secondEnv = withMockedDate("2026-04-19T10:00:00.000Z", () =>
+          const firstEnv = yield* firstEnvEffect
+          const secondEnvEffect = withMockedDate("2026-04-19T10:00:00.000Z", () =>
             svc.environmentForSession(sessionID, model),
           )
+          const secondEnv = yield* secondEnvEffect
           return { firstEnv, secondEnv }
         }).pipe(Effect.provide(SystemPrompt.defaultLayer))
 
@@ -135,7 +136,7 @@ describe("session.system env snapshot", () => {
   test("invalidateSessionEnv forces a fresh snapshot with current date", async () => {
     await using tmp = await tmpdir({ git: true })
 
-    await Instance.provide({
+    await provideTestInstance({
       directory: tmp.path,
       fn: async () => {
         const model = fakeModel()
@@ -143,14 +144,16 @@ describe("session.system env snapshot", () => {
 
         const program = Effect.gen(function* () {
           const svc = yield* SystemPrompt.Service
-          const firstEnv = withMockedDate("2026-04-18T10:00:00.000Z", () =>
+          const firstEnvEffect = withMockedDate("2026-04-18T10:00:00.000Z", () =>
             svc.environmentForSession(sessionID, model),
           )
+          const firstEnv = yield* firstEnvEffect
           // Invalidate, then call with "next day" — must reflect the NEW date
-          const secondEnv = withMockedDate("2026-04-19T10:00:00.000Z", () => {
+          const secondEnvEffect = withMockedDate("2026-04-19T10:00:00.000Z", () => {
             svc.invalidateSessionEnv(sessionID)
             return svc.environmentForSession(sessionID, model)
           })
+          const secondEnv = yield* secondEnvEffect
           return { firstEnv, secondEnv }
         }).pipe(Effect.provide(SystemPrompt.defaultLayer))
 
@@ -173,7 +176,7 @@ describe("session.system env snapshot", () => {
   test("Session.Event.Deleted purges the cached env snapshot", async () => {
     await using tmp = await tmpdir({ git: true })
 
-    await Instance.provide({
+    await provideTestInstance({
       directory: tmp.path,
       fn: async () => {
         const model = fakeModel()
@@ -187,8 +190,8 @@ describe("session.system env snapshot", () => {
           // publish — forkScoped returns before the first runForEach pull.
           yield* Effect.sleep("20 millis")
 
-          const before = svc.environmentForSession(sessionID, model)
-          const cachedHit = svc.environmentForSession(sessionID, model)
+          const before = yield* svc.environmentForSession(sessionID, model)
+          const cachedHit = yield* svc.environmentForSession(sessionID, model)
 
           // Publish the deletion event and yield long enough for the
           // bus subscriber forked inside the layer to process it.
@@ -204,7 +207,7 @@ describe("session.system env snapshot", () => {
           } as never)
           yield* Effect.sleep("20 millis")
 
-          const after = svc.environmentForSession(sessionID, model)
+          const after = yield* svc.environmentForSession(sessionID, model)
           return { before, cachedHit, after }
         }).pipe(Effect.provide(SystemPrompt.defaultLayer))
 

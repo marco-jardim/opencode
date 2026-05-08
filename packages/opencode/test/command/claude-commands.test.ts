@@ -2,9 +2,8 @@ import { afterEach, test, expect } from "bun:test"
 import path from "path"
 import fs from "fs/promises"
 import { Command } from "../../src/command"
-import { Instance } from "../../src/project/instance"
 import { makeRuntime } from "../../src/effect/run-service"
-import { tmpdir } from "../fixture/fixture"
+import { disposeAllInstances, provideTestInstance, tmpdir } from "../fixture/fixture"
 
 const { runPromise } = makeRuntime(Command.Service, Command.defaultLayer)
 const listCommands = (): Promise<Command.Info[]> => runPromise((svc: any) => svc.list())
@@ -14,7 +13,7 @@ const listCommands = (): Promise<Command.Info[]> => runPromise((svc: any) => svc
 // and assert the commands are surfaced by `listCommands()` with source "claude".
 
 afterEach(async () => {
-  await Instance.disposeAll()
+    await disposeAllInstances()
 })
 
 async function writeCommand(dir: string, name: string, frontmatter: Record<string, string>, body: string) {
@@ -37,7 +36,7 @@ test("discovers project commands from .claude/commands", async () => {
     },
   })
 
-  await Instance.provide({
+  await provideTestInstance({
     directory: tmp.path,
     fn: async () => {
       const commands = await listCommands()
@@ -64,7 +63,7 @@ test("discovers global commands from ~/.claude/commands", async () => {
       "Hi there",
     )
 
-    await Instance.provide({
+    await provideTestInstance({
       directory: tmp.path,
       fn: async () => {
         const commands = await listCommands()
@@ -93,7 +92,7 @@ test("namespaces nested commands with colon separator", async () => {
     },
   })
 
-  await Instance.provide({
+  await provideTestInstance({
     directory: tmp.path,
     fn: async () => {
       const commands = await listCommands()
@@ -126,7 +125,7 @@ test("discovers plugin commands from ~/.claude/plugins/cache/**/commands", async
     )
     await writeCommand(pluginCommands, "plug-cmd", { description: "From plugin" }, "Run the plugin thing")
 
-    await Instance.provide({
+    await provideTestInstance({
       directory: tmp.path,
       fn: async () => {
         const commands = await listCommands()
@@ -163,7 +162,7 @@ Review code based on: **$ARGUMENTS**
     },
   })
 
-  await Instance.provide({
+  await provideTestInstance({
     directory: tmp.path,
     fn: async () => {
       const commands = await listCommands()
@@ -197,7 +196,7 @@ test("config commands shadow claude commands with the same name", async () => {
     },
   })
 
-  await Instance.provide({
+  await provideTestInstance({
     directory: tmp.path,
     fn: async () => {
       const commands = await listCommands()
@@ -236,7 +235,7 @@ skill body
     },
   })
 
-  await Instance.provide({
+  await provideTestInstance({
     directory: tmp.path,
     fn: async () => {
       const commands = await listCommands()
@@ -271,7 +270,7 @@ test("OPENCODE_DISABLE_EXTERNAL_COMMANDS skips claude command discovery", async 
     // verify the flag is read at access time by stubbing Flag directly.
     // Since Flag captures env at module load, this test documents intent;
     // see Flag definition for the precedence rules.
-    await Instance.provide({
+    await provideTestInstance({
       directory: tmp.path,
       fn: async () => {
         const commands = await listCommands()

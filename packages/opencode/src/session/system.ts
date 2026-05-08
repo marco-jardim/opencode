@@ -1,6 +1,6 @@
 import { Context, Effect, Layer, Stream } from "effect"
 
-import { Instance } from "../project/instance"
+import { InstanceState } from "@/effect/instance-state"
 
 import PROMPT_ANTHROPIC from "./prompt/anthropic.txt"
 import PROMPT_DEFAULT from "./prompt/default.txt"
@@ -36,28 +36,8 @@ export function provider(model: Provider.Model) {
 }
 
 export interface Interface {
-  /**
-   * Compute a fresh environment preamble. Uses `new Date()` at call time and
-   * does NOT consult any cache, so every call returns a newly-built array.
-   * Preserved for backward compatibility and for code paths (tests, subagent
-   * edges) that genuinely want a just-computed snapshot.
-   */
-  readonly environment: (model: Provider.Model) => string[]
-  /**
-   * Session-stable env preamble. The first call for a given `sessionID`
-   * computes the env block and caches the result; subsequent calls return
-   * the same array reference until `invalidateSessionEnv(sessionID)` is
-   * invoked. This keeps "Today's date" (and future env fields like git
-   * branch / open files) stable for the lifetime of a session, preventing
-   * cache-breaking rewrites of the system prompt at midnight rollover.
-   */
-  readonly environmentForSession: (sessionID: SessionID, model: Provider.Model) => string[]
-  /**
-   * Drop the cached env snapshot for a session so the next call to
-   * `environmentForSession` recomputes with current values. Exposed for
-   * future `/refresh`-style callers; no-op when the session has no cached
-   * entry.
-   */
+  readonly environment: (model: Provider.Model) => Effect.Effect<string[]>
+  readonly environmentForSession: (sessionID: SessionID, model: Provider.Model) => Effect.Effect<string[]>
   readonly invalidateSessionEnv: (sessionID: SessionID) => void
   readonly skills: (agent: Agent.Info) => Effect.Effect<string | undefined>
 }
@@ -82,35 +62,44 @@ export const layer = Layer.effect(
       Effect.forkScoped,
     )
 
-    function buildEnv(model: Provider.Model): string[] {
-      const project = Instance.project
-      return [
-        [
-          `You are powered by the model named ${model.api.id}. The exact model ID is ${model.providerID}/${model.api.id}`,
-          `Here is some useful information about the environment you are running in:`,
-          `<env>`,
-          `  Working directory: ${Instance.directory}`,
-          `  Workspace root folder: ${Instance.worktree}`,
-          `  Is directory a git repo: ${project.vcs === "git" ? "yes" : "no"}`,
-          `  Platform: ${process.platform}`,
-          `  Today's date: ${new Date().toDateString()}`,
-          `</env>`,
-        ].join("\n"),
-      ]
-    }
-
     return Service.of({
-      environment(model) {
-        return buildEnv(model)
-      },
+      environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model) {
+        const ctx = yield* InstanceState.context
+        return [
+          [
+            `You are powered by the model named ${model.api.id}. The exact model ID is ${model.providerID}/${model.api.id}`,
+            `Here is some useful information about the environment you are running in:`,
+            `<env>`,
+            `  Working directory: ${ctx.directory}`,
+            `  Workspace root folder: ${ctx.worktree}`,
+            `  Is directory a git repo: ${ctx.project.vcs === "git" ? "yes" : "no"}`,
+            `  Platform: ${process.platform}`,
+            `  Today's date: ${new Date().toDateString()}`,
+            `</env>`,
+          ].join("\n"),
+        ]
+      }),
 
-      environmentForSession(sessionID, model) {
+      environmentForSession: Effect.fn("SystemPrompt.environmentForSession")(function* (sessionID: SessionID, model: Provider.Model) {
         const cached = envCache.get(sessionID)
         if (cached) return cached
-        const fresh = buildEnv(model)
+        const ctx = yield* InstanceState.context
+        const fresh = [
+          [
+            `You are powered by the model named ${model.api.id}. The exact model ID is ${model.providerID}/${model.api.id}`,
+            `Here is some useful information about the environment you are running in:`,
+            `<env>`,
+            `  Working directory: ${ctx.directory}`,
+            `  Workspace root folder: ${ctx.worktree}`,
+            `  Is directory a git repo: ${ctx.project.vcs === "git" ? "yes" : "no"}`,
+            `  Platform: ${process.platform}`,
+            `  Today's date: ${new Date().toDateString()}`,
+            `</env>`,
+          ].join("\n"),
+        ]
         envCache.set(sessionID, fresh)
         return fresh
-      },
+      }),
 
       invalidateSessionEnv(sessionID) {
         envCache.delete(sessionID)

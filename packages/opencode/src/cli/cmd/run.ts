@@ -1,10 +1,11 @@
 import type { Argv } from "yargs"
 import path from "path"
 import { pathToFileURL } from "url"
+import { Effect } from "effect"
 import { UI } from "../ui"
-import { cmd } from "./cmd"
+import { effectCmd } from "../effect-cmd"
 import { Flag } from "@opencode-ai/core/flag/flag"
-import { bootstrap } from "../bootstrap"
+import { ServerAuth } from "@/server/auth"
 import { EOL } from "os"
 import { Filesystem } from "@/util/filesystem"
 import { createOpencodeClient, type OpencodeClient, type ToolPart } from "@opencode-ai/sdk/v2"
@@ -22,10 +23,10 @@ import { WriteTool } from "../../tool/write"
 import { WebSearchTool } from "../../tool/websearch"
 import { TaskTool } from "../../tool/task"
 import { SkillTool } from "../../tool/skill"
-import { BashTool } from "../../tool/bash"
+import { ShellTool } from "../../tool/shell"
+import { ShellID } from "../../tool/shell/id"
 import { TodoWriteTool } from "../../tool/todo"
 import { Locale } from "@/util/locale"
-import { AppRuntime } from "@/effect/app-runtime"
 
 type ToolProps<T> = {
   input: Tool.InferParameters<T>
@@ -161,23 +162,10 @@ function task(info: ToolProps<typeof TaskTool>) {
     typeof input.description === "string" && input.description.trim().length > 0 ? input.description : undefined
   const icon = status === "error" ? "✗" : status === "running" ? "•" : "✓"
   const name = desc ?? `${agent} Task`
-  // #6 Subagent tier/cost tag. When the task tool's state metadata carries
-  // cost/tokens (see tool/task.ts #11), surface them inline so `opencode run`
-  // users see subagent spend per-call — critical for routing validation when
-  // using tier routers that dispatch work across fast/medium/heavy agents.
-  const meta = info.metadata as { cost?: number; tokens?: { cache?: { read?: number } } } | undefined
-  const cost = typeof meta?.cost === "number" ? meta.cost : undefined
-  const cacheRead = meta?.tokens?.cache?.read
-  const tag = (() => {
-    const parts: string[] = [`${agent} Agent`]
-    if (cost !== undefined && cost > 0) parts.push(`$${cost.toFixed(4)}`)
-    if (typeof cacheRead === "number" && cacheRead > 0) parts.push(`cache=${cacheRead}`)
-    return parts.join(" · ")
-  })()
   inline({
     icon,
     title: name,
-    description: desc ? tag : undefined,
+    description: desc ? `${agent} Agent` : undefined,
   })
 }
 
@@ -188,7 +176,7 @@ function skill(info: ToolProps<typeof SkillTool>) {
   })
 }
 
-function bash(info: ToolProps<typeof BashTool>) {
+function shell(info: ToolProps<typeof ShellTool>) {
   const output = info.part.state.status === "completed" ? info.part.state.output?.trim() : undefined
   block(
     {
@@ -215,11 +203,17 @@ function normalizePath(input?: string) {
   return input
 }
 
-export const RunCommand = cmd({
+export const RunCommand = effectCmd({
   command: "run [message..]",
   describe: "run opencode with a message",
-  builder: (yargs: Argv) => {
-    return yargs
+  // --attach connects to a remote server (no local instance needed); the
+  // default path runs an in-process server and needs the project instance.
+  instance: (args) => !args.attach,
+  // For --dir without --attach, load instance for the resolved target dir.
+  // The handler also chdirs (preserving the legacy order: chdir → file resolution).
+  directory: (args) => (args.dir && !args.attach ? path.resolve(process.cwd(), args.dir) : process.cwd()),
+  builder: (yargs: Argv) =>
+    yargs
       .positional("message", {
         describe: "message to send",
         type: "string",
@@ -282,6 +276,11 @@ export const RunCommand = cmd({
         type: "string",
         describe: "basic auth password (defaults to OPENCODE_SERVER_PASSWORD)",
       })
+      .option("username", {
+        alias: ["u"],
+        type: "string",
+        describe: "basic auth username (defaults to OPENCODE_SERVER_USERNAME or 'opencode')",
+      })
       .option("dir", {
         type: "string",
         describe: "directory to run in, path on remote server if attaching",
@@ -308,382 +307,384 @@ export const RunCommand = cmd({
         type: "boolean",
         describe: "read stdin as newline-delimited prompts, running each as a separate turn",
         default: false,
-      })
-  },
-  handler: async (args) => {
-    let message = [...args.message, ...(args["--"] || [])]
-      .map((arg) => (arg.includes(" ") ? `"${arg.replace(/"/g, '\\"')}"` : arg))
-      .join(" ")
+      }),
+  handler: Effect.fn("Cli.run")(function* (args) {
+    const agentSvc = yield* Agent.Service
+    yield* Effect.promise(async () => {
+      let message = [...args.message, ...(args["--"] || [])]
+        .map((arg) => (arg.includes(" ") ? `"${arg.replace(/"/g, '\\"')}"` : arg))
+        .join(" ")
 
-    const directory = (() => {
-      if (!args.dir) return undefined
-      if (args.attach) return args.dir
-      try {
-        process.chdir(args.dir)
-        return process.cwd()
-      } catch {
-        UI.error("Failed to change directory to " + args.dir)
-        process.exit(1)
-      }
-    })()
-
-    const files: { type: "file"; url: string; filename: string; mime: string }[] = []
-    if (args.file) {
-      const list = Array.isArray(args.file) ? args.file : [args.file]
-
-      for (const filePath of list) {
-        const resolvedPath = path.resolve(process.cwd(), filePath)
-        if (!(await Filesystem.exists(resolvedPath))) {
-          UI.error(`File not found: ${filePath}`)
+      const directory = (() => {
+        if (!args.dir) return undefined
+        if (args.attach) return args.dir
+        try {
+          process.chdir(args.dir)
+          return process.cwd()
+        } catch {
+          UI.error("Failed to change directory to " + args.dir)
           process.exit(1)
         }
+      })()
 
-        const mime = (await Filesystem.isDir(resolvedPath)) ? "application/x-directory" : "text/plain"
+      const files: { type: "file"; url: string; filename: string; mime: string }[] = []
+      if (args.file) {
+        const list = Array.isArray(args.file) ? args.file : [args.file]
 
-        files.push({
-          type: "file",
-          url: pathToFileURL(resolvedPath).href,
-          filename: path.basename(resolvedPath),
-          mime,
+        for (const filePath of list) {
+          const resolvedPath = path.resolve(process.cwd(), filePath)
+          if (!(await Filesystem.exists(resolvedPath))) {
+            UI.error(`File not found: ${filePath}`)
+            process.exit(1)
+          }
+
+          const mime = (await Filesystem.isDir(resolvedPath)) ? "application/x-directory" : "text/plain"
+
+          files.push({
+            type: "file",
+            url: pathToFileURL(resolvedPath).href,
+            filename: path.basename(resolvedPath),
+            mime,
+          })
+        }
+      }
+
+      const batch: string[] = []
+      if (args["stream-stdin"]) {
+        if (process.stdin.isTTY) {
+          UI.error("--stream-stdin requires piped stdin")
+          process.exit(1)
+        }
+        if (args.continue || args.session || args.fork) {
+          UI.error("--stream-stdin is incompatible with --continue/--session/--fork")
+          process.exit(1)
+        }
+        const text = await Bun.stdin.text()
+        for (const raw of text.split(/\r?\n/)) {
+          const line = raw.trim()
+          if (line.length > 0) batch.push(line)
+        }
+        if (batch.length === 0) {
+          UI.error("--stream-stdin received empty input")
+          process.exit(1)
+        }
+      } else {
+        if (!process.stdin.isTTY) message += "\n" + (await Bun.stdin.text())
+      }
+
+      if (!args["stream-stdin"] && message.trim().length === 0 && !args.command) {
+        UI.error("You must provide a message or a command")
+        process.exit(1)
+      }
+
+      if (args.fork && !args.continue && !args.session) {
+        UI.error("--fork requires --continue or --session")
+        process.exit(1)
+      }
+
+      const rules: Permission.Ruleset = [
+        {
+          permission: "question",
+          action: "deny",
+          pattern: "*",
+        },
+        {
+          permission: "plan_enter",
+          action: "deny",
+          pattern: "*",
+        },
+        {
+          permission: "plan_exit",
+          action: "deny",
+          pattern: "*",
+        },
+      ]
+
+      function title() {
+        if (args.title === undefined) return
+        if (args.title !== "") return args.title
+        return message.slice(0, 50) + (message.length > 50 ? "..." : "")
+      }
+
+      async function session(sdk: OpencodeClient) {
+        const baseID = args.continue ? (await sdk.session.list()).data?.find((s) => !s.parentID)?.id : args.session
+
+        if (baseID && args.fork) {
+          const forked = await sdk.session.fork({ sessionID: baseID })
+          return forked.data?.id
+        }
+
+        if (baseID) return baseID
+
+        const name = title()
+        const result = await sdk.session.create({ title: name, permission: rules })
+        return result.data?.id
+      }
+
+      async function share(sdk: OpencodeClient, sessionID: string) {
+        const cfg = await sdk.config.get()
+        if (!cfg.data) return
+        if (cfg.data.share !== "auto" && !Flag.OPENCODE_AUTO_SHARE && !args.share) return
+        const res = await sdk.session.share({ sessionID }).catch((error) => {
+          if (error instanceof Error && error.message.includes("disabled")) {
+            UI.println(UI.Style.TEXT_DANGER_BOLD + "!  " + error.message)
+          }
+          return { error }
         })
-      }
-    }
-
-    // #8 --stream-stdin batch mode. Each newline-delimited line on stdin becomes
-    // an independent session/turn — lets you pipe prompt lists through
-    // `opencode run` without spinning the process up per query (bootstrap is
-    // expensive). Mutually exclusive with --continue/--session/--fork since
-    // those target one specific session.
-    const batch: string[] = []
-    if (args["stream-stdin"]) {
-      if (process.stdin.isTTY) {
-        UI.error("--stream-stdin requires piped stdin")
-        process.exit(1)
-      }
-      if (args.continue || args.session || args.fork) {
-        UI.error("--stream-stdin is incompatible with --continue/--session/--fork")
-        process.exit(1)
-      }
-      const text = await Bun.stdin.text()
-      for (const raw of text.split(/\r?\n/)) {
-        const line = raw.trim()
-        if (line.length > 0) batch.push(line)
-      }
-      if (batch.length === 0) {
-        UI.error("--stream-stdin received empty input")
-        process.exit(1)
-      }
-    } else {
-      if (!process.stdin.isTTY) message += "\n" + (await Bun.stdin.text())
-    }
-
-    if (!args["stream-stdin"] && message.trim().length === 0 && !args.command) {
-      UI.error("You must provide a message or a command")
-      process.exit(1)
-    }
-
-    if (args.fork && !args.continue && !args.session) {
-      UI.error("--fork requires --continue or --session")
-      process.exit(1)
-    }
-
-    const rules: Permission.Ruleset = [
-      {
-        permission: "question",
-        action: "deny",
-        pattern: "*",
-      },
-      {
-        permission: "plan_enter",
-        action: "deny",
-        pattern: "*",
-      },
-      {
-        permission: "plan_exit",
-        action: "deny",
-        pattern: "*",
-      },
-    ]
-
-    function title() {
-      if (args.title === undefined) return
-      if (args.title !== "") return args.title
-      return message.slice(0, 50) + (message.length > 50 ? "..." : "")
-    }
-
-    async function session(sdk: OpencodeClient) {
-      const baseID = args.continue ? (await sdk.session.list()).data?.find((s) => !s.parentID)?.id : args.session
-
-      if (baseID && args.fork) {
-        const forked = await sdk.session.fork({ sessionID: baseID })
-        return forked.data?.id
-      }
-
-      if (baseID) return baseID
-
-      const name = title()
-      const result = await sdk.session.create({ title: name, permission: rules })
-      return result.data?.id
-    }
-
-    async function share(sdk: OpencodeClient, sessionID: string) {
-      const cfg = await sdk.config.get()
-      if (!cfg.data) return
-      if (cfg.data.share !== "auto" && !Flag.OPENCODE_AUTO_SHARE && !args.share) return
-      const res = await sdk.session.share({ sessionID }).catch((error) => {
-        if (error instanceof Error && error.message.includes("disabled")) {
-          UI.println(UI.Style.TEXT_DANGER_BOLD + "!  " + error.message)
-        }
-        return { error }
-      })
-      if (!res.error && "data" in res && res.data?.share?.url) {
-        UI.println(UI.Style.TEXT_INFO_BOLD + "~  " + res.data.share.url)
-      }
-    }
-
-    async function execute(sdk: OpencodeClient) {
-      function tool(part: ToolPart) {
-        try {
-          if (part.tool === "bash") return bash(props<typeof BashTool>(part))
-          if (part.tool === "glob") return glob(props<typeof GlobTool>(part))
-          if (part.tool === "grep") return grep(props<typeof GrepTool>(part))
-          if (part.tool === "read") return read(props<typeof ReadTool>(part))
-          if (part.tool === "write") return write(props<typeof WriteTool>(part))
-          if (part.tool === "webfetch") return webfetch(props<typeof WebFetchTool>(part))
-          if (part.tool === "edit") return edit(props<typeof EditTool>(part))
-          if (part.tool === "websearch") return websearch(props<typeof WebSearchTool>(part))
-          if (part.tool === "task") return task(props<typeof TaskTool>(part))
-          if (part.tool === "todowrite") return todo(props<typeof TodoWriteTool>(part))
-          if (part.tool === "skill") return skill(props<typeof SkillTool>(part))
-          return fallback(part)
-        } catch {
-          return fallback(part)
+        if (!res.error && "data" in res && res.data?.share?.url) {
+          UI.println(UI.Style.TEXT_INFO_BOLD + "~  " + res.data.share.url)
         }
       }
 
-      function emit(type: string, data: Record<string, unknown>) {
-        if (args.format === "json") {
-          process.stdout.write(
-            JSON.stringify({ type, timestamp: Date.now(), sessionID: currentSessionID, ...data }) + EOL,
-          )
-          return true
-        }
-        return false
-      }
-
-      const events = await sdk.event.subscribe()
-      let error: string | undefined
-      // #8 Mutable session reference: batch mode rotates this per stdin line
-      // while the single `loop()` consumer keeps draining the shared events
-      // stream. Using a resolve signal for idle (instead of break) lets one
-      // loop() handle N sequential turns without losing events between them.
-      let currentSessionID: string | undefined
-      let pendingIdle: { resolve: () => void } | undefined
-
-      async function loop() {
-        const toggles = new Map<string, boolean>()
-        // #5 Per-turn cost/token footer. Print a compact status line after each
-        // assistant message finishes streaming so users running `opencode run`
-        // know exactly what each turn cost, how much context they burned, and
-        // what fraction came from cache — catches billing regressions and
-        // cache-miss explosions without digging through server logs.
-        const footerPrinted = new Set<string>()
-
-        function footer(info: {
-          id: string
-          cost: number
-          tokens: { input: number; output: number; cache: { read: number; write: number }; reasoning: number }
-          modelID: string
-          providerID: string
-        }) {
-          if (footerPrinted.has(info.id)) return
-          footerPrinted.add(info.id)
-          if (args.format === "json") return
-          const t = info.tokens
-          const totalIn = t.input + t.cache.read + t.cache.write
-          const cachePct = totalIn > 0 ? Math.round((t.cache.read / totalIn) * 100) : 0
-          const parts = [
-            `in=${t.input}`,
-            `out=${t.output}`,
-            `cache_read=${t.cache.read}`,
-            `cache_write=${t.cache.write}`,
-            `cache=${cachePct}%`,
-            `$${info.cost.toFixed(4)}`,
-          ]
-          UI.empty()
-          UI.println(UI.Style.TEXT_DIM + "⋯ " + parts.join(" · ") + UI.Style.TEXT_NORMAL)
-          UI.empty()
+      async function execute(sdk: OpencodeClient) {
+        function tool(part: ToolPart) {
+          try {
+            if (part.tool === ShellID.ToolID) return shell(props<typeof ShellTool>(part))
+            if (part.tool === "glob") return glob(props<typeof GlobTool>(part))
+            if (part.tool === "grep") return grep(props<typeof GrepTool>(part))
+            if (part.tool === "read") return read(props<typeof ReadTool>(part))
+            if (part.tool === "write") return write(props<typeof WriteTool>(part))
+            if (part.tool === "webfetch") return webfetch(props<typeof WebFetchTool>(part))
+            if (part.tool === "edit") return edit(props<typeof EditTool>(part))
+            if (part.tool === "websearch") return websearch(props<typeof WebSearchTool>(part))
+            if (part.tool === "task") return task(props<typeof TaskTool>(part))
+            if (part.tool === "todowrite") return todo(props<typeof TodoWriteTool>(part))
+            if (part.tool === "skill") return skill(props<typeof SkillTool>(part))
+            return fallback(part)
+          } catch {
+            return fallback(part)
+          }
         }
 
-        for await (const event of events.stream) {
-          if (
-            event.type === "message.updated" &&
-            event.properties.info.role === "assistant" &&
-            args.format !== "json" &&
-            toggles.get("start") !== true
-          ) {
+        function emit(type: string, data: Record<string, unknown>) {
+          if (args.format === "json") {
+            process.stdout.write(
+              JSON.stringify({ type, timestamp: Date.now(), sessionID: currentSessionID, ...data }) + EOL,
+            )
+            return true
+          }
+          return false
+        }
+
+        const events = await sdk.event.subscribe()
+        let error: string | undefined
+        let currentSessionID: string | undefined
+        let pendingIdle: { resolve: () => void } | undefined
+
+        async function loop() {
+          const toggles = new Map<string, boolean>()
+          const footerPrinted = new Set<string>()
+
+          function footer(info: {
+            id: string
+            cost: number
+            tokens: { input: number; output: number; cache: { read: number; write: number }; reasoning: number }
+            modelID: string
+            providerID: string
+          }) {
+            if (footerPrinted.has(info.id)) return
+            footerPrinted.add(info.id)
+            if (args.format === "json") return
+            const t = info.tokens
+            const totalIn = t.input + t.cache.read + t.cache.write
+            const cachePct = totalIn > 0 ? Math.round((t.cache.read / totalIn) * 100) : 0
+            const parts = [
+              `in=${t.input}`,
+              `out=${t.output}`,
+              `cache_read=${t.cache.read}`,
+              `cache_write=${t.cache.write}`,
+              `cache=${cachePct}%`,
+              `$${info.cost.toFixed(4)}`,
+            ]
             UI.empty()
-            UI.println(`> ${event.properties.info.agent} · ${event.properties.info.modelID}`)
+            UI.println(UI.Style.TEXT_DIM + "⋯ " + parts.join(" · ") + UI.Style.TEXT_NORMAL)
             UI.empty()
-            toggles.set("start", true)
           }
 
-          // #5 Print the cost/token footer as soon as the assistant message
-          // carries a `time.completed` timestamp. The footerPrinted set ensures
-          // it fires exactly once per message even though message.updated can
-          // fan out dozens of times during streaming.
-          if (
-            event.type === "message.updated" &&
-            event.properties.info.role === "assistant" &&
-            event.properties.info.time.completed !== undefined &&
-            event.properties.info.tokens.output > 0
-          ) {
-            footer({
-              id: event.properties.info.id,
-              cost: event.properties.info.cost,
-              tokens: event.properties.info.tokens,
-              modelID: event.properties.info.modelID,
-              providerID: event.properties.info.providerID,
-            })
-          }
-
-          if (event.type === "message.part.updated") {
-            const part = event.properties.part
-            if (part.sessionID !== currentSessionID) continue
-
-            if (part.type === "tool" && (part.state.status === "completed" || part.state.status === "error")) {
-              if (emit("tool_use", { part })) continue
-              if (part.state.status === "completed") {
-                tool(part)
-                continue
-              }
-              inline({
-                icon: "✗",
-                title: `${part.tool} failed`,
-              })
-              UI.error(part.state.error)
+          for await (const event of events.stream) {
+            if (
+              event.type === "message.updated" &&
+              event.properties.info.role === "assistant" &&
+              args.format !== "json" &&
+              toggles.get("start") !== true
+            ) {
+              UI.empty()
+              UI.println(`> ${event.properties.info.agent} · ${event.properties.info.modelID}`)
+              UI.empty()
+              toggles.set("start", true)
             }
 
             if (
-              part.type === "tool" &&
-              part.tool === "task" &&
-              part.state.status === "running" &&
-              args.format !== "json"
+              event.type === "message.updated" &&
+              event.properties.info.role === "assistant" &&
+              event.properties.info.time.completed !== undefined &&
+              event.properties.info.tokens.output > 0
             ) {
-              if (toggles.get(part.id) === true) continue
-              task(props<typeof TaskTool>(part))
-              toggles.set(part.id, true)
-            }
-
-            if (part.type === "step-start") {
-              if (emit("step_start", { part })) continue
-            }
-
-            if (part.type === "step-finish") {
-              if (emit("step_finish", { part })) continue
-            }
-
-            if (part.type === "text" && part.time?.end) {
-              if (emit("text", { part })) continue
-              const text = part.text.trim()
-              if (!text) continue
-              if (!process.stdout.isTTY) {
-                process.stdout.write(text + EOL)
-                continue
-              }
-              UI.empty()
-              UI.println(text)
-              UI.empty()
-            }
-
-            if (part.type === "reasoning" && part.time?.end && args.thinking) {
-              if (emit("reasoning", { part })) continue
-              const text = part.text.trim()
-              if (!text) continue
-              const line = `Thinking: ${text}`
-              if (process.stdout.isTTY) {
-                UI.empty()
-                UI.println(`${UI.Style.TEXT_DIM}\u001b[3m${line}\u001b[0m${UI.Style.TEXT_NORMAL}`)
-                UI.empty()
-                continue
-              }
-              process.stdout.write(line + EOL)
-            }
-          }
-
-          if (event.type === "session.error") {
-            const props = event.properties
-            if (props.sessionID !== currentSessionID || !props.error) continue
-            let err = String(props.error.name)
-            if ("data" in props.error && props.error.data && "message" in props.error.data) {
-              err = String(props.error.data.message)
-            }
-            error = error ? error + EOL + err : err
-            if (emit("error", { error: props.error })) continue
-            UI.error(err)
-          }
-
-          if (
-            event.type === "session.status" &&
-            event.properties.sessionID === currentSessionID &&
-            event.properties.status.type === "idle"
-          ) {
-            // #8 Signal turn-complete to runTurn() via pendingIdle instead of
-            // breaking. loop() keeps draining events so the next batch turn
-            // doesn't drop its own message.updated/part.updated stream.
-            const pending = pendingIdle
-            pendingIdle = undefined
-            pending?.resolve()
-            continue
-          }
-
-          if (event.type === "permission.asked") {
-            const permission = event.properties
-            if (permission.sessionID !== currentSessionID) continue
-
-            if (args["dangerously-skip-permissions"]) {
-              await sdk.permission.reply({
-                requestID: permission.id,
-                reply: "once",
+              footer({
+                id: event.properties.info.id,
+                cost: event.properties.info.cost,
+                tokens: event.properties.info.tokens,
+                modelID: event.properties.info.modelID,
+                providerID: event.properties.info.providerID,
               })
-            } else {
-              UI.println(
-                UI.Style.TEXT_WARNING_BOLD + "!",
-                UI.Style.TEXT_NORMAL +
-                  `permission requested: ${permission.permission} (${permission.patterns.join(", ")}); auto-rejecting`,
-              )
-              await sdk.permission.reply({
-                requestID: permission.id,
-                reply: "reject",
-              })
+            }
+
+            if (event.type === "message.part.updated") {
+              const part = event.properties.part
+              if (part.sessionID !== currentSessionID) continue
+
+              if (part.type === "tool" && (part.state.status === "completed" || part.state.status === "error")) {
+                if (emit("tool_use", { part })) continue
+                if (part.state.status === "completed") {
+                  tool(part)
+                  continue
+                }
+                inline({
+                  icon: "✗",
+                  title: `${part.tool} failed`,
+                })
+                UI.error(part.state.error)
+              }
+
+              if (
+                part.type === "tool" &&
+                part.tool === "task" &&
+                part.state.status === "running" &&
+                args.format !== "json"
+              ) {
+                if (toggles.get(part.id) === true) continue
+                task(props<typeof TaskTool>(part))
+                toggles.set(part.id, true)
+              }
+
+              if (part.type === "step-start") {
+                if (emit("step_start", { part })) continue
+              }
+
+              if (part.type === "step-finish") {
+                if (emit("step_finish", { part })) continue
+              }
+
+              if (part.type === "text" && part.time?.end) {
+                if (emit("text", { part })) continue
+                const text = part.text.trim()
+                if (!text) continue
+                if (!process.stdout.isTTY) {
+                  process.stdout.write(text + EOL)
+                  continue
+                }
+                UI.empty()
+                UI.println(text)
+                UI.empty()
+              }
+
+              if (part.type === "reasoning" && part.time?.end && args.thinking) {
+                if (emit("reasoning", { part })) continue
+                const text = part.text.trim()
+                if (!text) continue
+                const line = `Thinking: ${text}`
+                if (process.stdout.isTTY) {
+                  UI.empty()
+                  UI.println(`${UI.Style.TEXT_DIM}\u001b[3m${line}\u001b[0m${UI.Style.TEXT_NORMAL}`)
+                  UI.empty()
+                  continue
+                }
+                process.stdout.write(line + EOL)
+              }
+            }
+
+            if (event.type === "session.error") {
+              const props = event.properties
+              if (props.sessionID !== currentSessionID || !props.error) continue
+              let err = String(props.error.name)
+              if ("data" in props.error && props.error.data && "message" in props.error.data) {
+                err = String(props.error.data.message)
+              }
+              error = error ? error + EOL + err : err
+              if (emit("error", { error: props.error })) continue
+              UI.error(err)
+            }
+
+            if (
+              event.type === "session.status" &&
+              event.properties.sessionID === currentSessionID &&
+              event.properties.status.type === "idle"
+            ) {
+              const pending = pendingIdle
+              pendingIdle = undefined
+              pending?.resolve()
+              continue
+            }
+
+            if (event.type === "permission.asked") {
+              const permission = event.properties
+              if (permission.sessionID !== currentSessionID) continue
+
+              if (args["dangerously-skip-permissions"]) {
+                await sdk.permission.reply({
+                  requestID: permission.id,
+                  reply: "once",
+                })
+              } else {
+                UI.println(
+                  UI.Style.TEXT_WARNING_BOLD + "!",
+                  UI.Style.TEXT_NORMAL +
+                    `permission requested: ${permission.permission} (${permission.patterns.join(", ")}); auto-rejecting`,
+                )
+                await sdk.permission.reply({
+                  requestID: permission.id,
+                  reply: "reject",
+                })
+              }
             }
           }
         }
-      }
 
-      // Validate agent if specified
-      const agent = await (async () => {
-        if (!args.agent) return undefined
-        const name = args.agent
+        // Validate agent if specified
+        const agent = await (async () => {
+          if (!args.agent) return undefined
+          const name = args.agent
 
-        // When attaching, validate against the running server instead of local Instance state.
-        if (args.attach) {
-          const modes = await sdk.app
-            .agents(undefined, { throwOnError: true })
-            .then((x) => x.data ?? [])
-            .catch(() => undefined)
+          // When attaching, validate against the running server instead of local Instance state.
+          if (args.attach) {
+            const modes = await sdk.app
+              .agents(undefined, { throwOnError: true })
+              .then((x) => x.data ?? [])
+              .catch(() => undefined)
 
-          if (!modes) {
-            UI.println(
-              UI.Style.TEXT_WARNING_BOLD + "!",
-              UI.Style.TEXT_NORMAL,
-              `failed to list agents from ${args.attach}. Falling back to default agent`,
-            )
-            return undefined
+            if (!modes) {
+              UI.println(
+                UI.Style.TEXT_WARNING_BOLD + "!",
+                UI.Style.TEXT_NORMAL,
+                `failed to list agents from ${args.attach}. Falling back to default agent`,
+              )
+              return undefined
+            }
+
+            const agent = modes.find((a) => a.name === name)
+            if (!agent) {
+              UI.println(
+                UI.Style.TEXT_WARNING_BOLD + "!",
+                UI.Style.TEXT_NORMAL,
+                `agent "${name}" not found. Falling back to default agent`,
+              )
+              return undefined
+            }
+
+            if (agent.mode === "subagent") {
+              UI.println(
+                UI.Style.TEXT_WARNING_BOLD + "!",
+                UI.Style.TEXT_NORMAL,
+                `agent "${name}" is a subagent, not a primary agent. Falling back to default agent`,
+              )
+              return undefined
+            }
+
+            return name
           }
 
-          const agent = modes.find((a) => a.name === name)
-          if (!agent) {
+          const entry = await Effect.runPromise(agentSvc.get(name))
+          if (!entry) {
             UI.println(
               UI.Style.TEXT_WARNING_BOLD + "!",
               UI.Style.TEXT_NORMAL,
@@ -691,8 +692,7 @@ export const RunCommand = cmd({
             )
             return undefined
           }
-
-          if (agent.mode === "subagent") {
+          if (entry.mode === "subagent") {
             UI.println(
               UI.Style.TEXT_WARNING_BOLD + "!",
               UI.Style.TEXT_NORMAL,
@@ -700,113 +700,81 @@ export const RunCommand = cmd({
             )
             return undefined
           }
-
           return name
-        }
-
-        const entry = await AppRuntime.runPromise(Agent.Service.use((svc) => svc.get(name)))
-        if (!entry) {
-          UI.println(
-            UI.Style.TEXT_WARNING_BOLD + "!",
-            UI.Style.TEXT_NORMAL,
-            `agent "${name}" not found. Falling back to default agent`,
-          )
-          return undefined
-        }
-        if (entry.mode === "subagent") {
-          UI.println(
-            UI.Style.TEXT_WARNING_BOLD + "!",
-            UI.Style.TEXT_NORMAL,
-            `agent "${name}" is a subagent, not a primary agent. Falling back to default agent`,
-          )
-          return undefined
-        }
-        return name
-      })()
-
-      // Start loop() once — it drains events for the entire execute() lifetime.
-      loop().catch((e) => {
-        console.error(e)
-        process.exit(1)
-      })
-
-      async function runTurn(text: string, freshSession: boolean) {
-        const id = await (async () => {
-          if (freshSession) {
-            const name = (() => {
-              if (args.title === undefined) return
-              if (args.title !== "") return args.title
-              return text.slice(0, 50) + (text.length > 50 ? "..." : "")
-            })()
-            const result = await sdk.session.create({ title: name, permission: rules })
-            return result.data?.id
-          }
-          return session(sdk)
         })()
-        if (!id) {
-          UI.error("Session not found")
-          process.exit(1)
-        }
-        await share(sdk, id)
 
-        currentSessionID = id
-        const idlePromise = new Promise<void>((resolve) => {
-          pendingIdle = { resolve }
+        loop().catch((e) => {
+          console.error(e)
+          process.exit(1)
         })
 
-        if (args.command) {
-          await sdk.session.command({
-            sessionID: id,
-            agent,
-            model: args.model,
-            command: args.command,
-            arguments: text,
-            variant: args.variant,
-          })
-        } else {
-          const model = args.model ? Provider.parseModel(args.model) : undefined
-          await sdk.session.prompt({
-            sessionID: id,
-            agent,
-            model,
-            variant: args.variant,
-            parts: [...files, { type: "text", text }],
-          })
-        }
-
-        // #8 Wait for the session.status idle event before continuing to the
-        // next batch turn. Prevents interleaved output when running multiple
-        // stdin lines in sequence.
-        await idlePromise
-      }
-
-      if (batch.length > 0) {
-        for (let i = 0; i < batch.length; i++) {
-          if (args.format !== "json") {
-            const preview = batch[i].slice(0, 72) + (batch[i].length > 72 ? "..." : "")
-            UI.empty()
-            UI.println(UI.Style.TEXT_INFO_BOLD + `[${i + 1}/${batch.length}] ${preview}`)
+        async function runTurn(text: string, freshSession: boolean) {
+          const id = await (async () => {
+            if (freshSession) {
+              const name = (() => {
+                if (args.title === undefined) return
+                if (args.title !== "") return args.title
+                return text.slice(0, 50) + (text.length > 50 ? "..." : "")
+              })()
+              const result = await sdk.session.create({ title: name, permission: rules })
+              return result.data?.id
+            }
+            return session(sdk)
+          })()
+          if (!id) {
+            UI.error("Session not found")
+            process.exit(1)
           }
-          await runTurn(batch[i], true)
+          await share(sdk, id)
+
+          currentSessionID = id
+          const idlePromise = new Promise<void>((resolve) => {
+            pendingIdle = { resolve }
+          })
+
+          if (args.command) {
+            await sdk.session.command({
+              sessionID: id,
+              agent,
+              model: args.model,
+              command: args.command,
+              arguments: text,
+              variant: args.variant,
+            })
+          } else {
+            const model = args.model ? Provider.parseModel(args.model) : undefined
+            await sdk.session.prompt({
+              sessionID: id,
+              agent,
+              model,
+              variant: args.variant,
+              parts: [...files, { type: "text", text }],
+            })
+          }
+
+          await idlePromise
         }
-      } else {
-        await runTurn(message, false)
+
+        if (batch.length > 0) {
+          for (let i = 0; i < batch.length; i++) {
+            if (args.format !== "json") {
+              const preview = batch[i].slice(0, 72) + (batch[i].length > 72 ? "..." : "")
+              UI.empty()
+              UI.println(UI.Style.TEXT_INFO_BOLD + `[${i + 1}/${batch.length}] ${preview}`)
+            }
+            await runTurn(batch[i], true)
+          }
+        } else {
+          await runTurn(message, false)
+        }
       }
-    }
 
-    if (args.attach) {
-      const headers = (() => {
-        const password = args.password ?? process.env.OPENCODE_SERVER_PASSWORD
-        if (!password) return undefined
-        const username = process.env.OPENCODE_SERVER_USERNAME ?? "opencode"
-        const auth = `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`
-        return { Authorization: auth }
-      })()
-      const sdk = createOpencodeClient({ baseUrl: args.attach, directory, headers })
-      return await execute(sdk)
-    }
+      if (args.attach) {
+        const headers = ServerAuth.headers({ password: args.password, username: args.username })
+        const sdk = createOpencodeClient({ baseUrl: args.attach, directory, headers })
+        return await execute(sdk)
+      }
 
-    await bootstrap(process.cwd(), async () => {
       const fetchFn = (async (input: RequestInfo | URL, init?: RequestInit) => {
         const request = new Request(input, init)
         return Server.Default().app.fetch(request)
@@ -814,5 +782,5 @@ export const RunCommand = cmd({
       const sdk = createOpencodeClient({ baseUrl: "http://opencode.internal", fetch: fetchFn })
       await execute(sdk)
     })
-  },
+  }),
 })
