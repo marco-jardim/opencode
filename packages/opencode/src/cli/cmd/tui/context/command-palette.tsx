@@ -20,6 +20,7 @@ type SlashEntry = {
 type CommandPaletteContext = {
   run(command: string): void
   show(): void
+  handleSlash(name: string, args: string): boolean
   slashes: Accessor<readonly SlashEntry[]>
   suspend(enabled: boolean): void
   readonly suspended: boolean
@@ -79,8 +80,25 @@ export function CommandPaletteProvider(props: ParentProps) {
     }),
   )
 
+  const allEntries = useKeymapSelector((keymap: OpenTuiKeymap) =>
+    keymap.getCommandEntries({ visibility: "registered" }),
+  )
+
   const value: CommandPaletteContext = {
     run,
+    handleSlash(name: string, args: string): boolean {
+      for (const entry of allEntries()) {
+        const cmd = entry.command
+        const slashName = cmd.slashName
+        if (typeof slashName !== "string" || !slashName) continue
+        if (slashName !== name && !(Array.isArray(cmd.slashAliases) && cmd.slashAliases.includes(name))) continue
+        const onSlashSubmit = cmd.onSlashSubmit
+        if (typeof onSlashSubmit === "function") return (onSlashSubmit as (args: string) => boolean)(args)
+        run(cmd.name)
+        return true
+      }
+      return false
+    },
     show() {
       dialog.replace(() => <CommandPaletteDialog run={run} />)
     },

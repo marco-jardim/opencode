@@ -60,6 +60,8 @@ import { useArgs } from "@tui/context/args"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { type WorkspaceStatus } from "../workspace-label"
 import { useCommandPalette } from "../../context/command-palette"
+import { formatTokens } from "../../util/format-tokens"
+import { useTurnTiming } from "../../util/turn-timing"
 import { useBindings, useCommandShortcut, useLeaderActive, useOpencodeKeymap } from "../../keymap"
 import { useTuiConfig } from "../../context/tui-config"
 
@@ -336,10 +338,37 @@ export function Prompt(props: PromptProps) {
     return messages.findLast((m): m is UserMessage => m.role === "user")
   })
 
+  const messages = createMemo(() => {
+    if (!props.sessionID) return []
+    return sync.data.message[props.sessionID] ?? []
+  })
+
+  const assistants = createMemo(() => messages().filter((m): m is AssistantMessage => m.role === "assistant"))
+
+  const lastAssistant = createMemo(() => assistants().at(-1))
+
+  const { elapsed: turnElapsed, tps } = useTurnTiming(status, lastAssistant)
+
+  const turnToolCount = createMemo(() => {
+    const last = lastAssistant()
+    if (!last) return 0
+    const parts = sync.data.part[last.id] ?? []
+    return parts.filter((p) => p.type === "tool").length
+  })
+
+  const compactionCount = createMemo(() => {
+    if (!props.sessionID) return 0
+    let count = 0
+    for (const m of assistants()) {
+      const parts = sync.data.part[m.id] ?? []
+      count += parts.filter((p) => p.type === "compaction").length
+    }
+    return count
+  })
+
   const usage = createMemo(() => {
-    if (!props.sessionID) return
-    const msg = sync.data.message[props.sessionID] ?? []
-    const last = msg.findLast((item): item is AssistantMessage => item.role === "assistant" && item.tokens.output > 0)
+    const all = assistants().filter((m) => m.tokens.output > 0)
+    const last = all.at(-1)
     if (!last) return
 
     const tokens =
@@ -347,10 +376,30 @@ export function Prompt(props: PromptProps) {
     if (tokens <= 0) return
 
     const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
-    const pct = model?.limit.context ? `${Math.round((tokens / model.limit.context) * 100)}%` : undefined
-    const cost = msg.reduce((sum, item) => sum + (item.role === "assistant" ? item.cost : 0), 0)
+    const ctxLimit = model?.limit.context
+    const pctNum = ctxLimit ? Math.min(100, Math.round((tokens / ctxLimit) * 100)) : undefined
+
+    const cacheRead = last.tokens.cache.read
+    const turnIn = last.tokens.input + cacheRead + last.tokens.cache.write
+    const turnOut = last.tokens.output + last.tokens.reasoning
+    const hitSuffix = cacheRead > 0 ? ` (${formatTokens(cacheRead)} hit)` : ""
+
+    const sessionIn = all.reduce((sum, m) => sum + m.tokens.input + m.tokens.cache.read + m.tokens.cache.write, 0)
+    const sessionOut = all.reduce((sum, m) => sum + m.tokens.output + m.tokens.reasoning, 0)
+    const sessionCacheReads = all.reduce((s, m) => s + m.tokens.cache.read, 0)
+    const sessionHitRate = sessionIn > 0 ? Math.round((sessionCacheReads / sessionIn) * 100) : undefined
+
+    const cost = all.reduce((sum, m) => sum + m.cost, 0)
+
+    const ctxStr = ctxLimit
+      ? `${formatTokens(tokens)}/${formatTokens(ctxLimit)} (${pctNum}%)`
+      : `${formatTokens(tokens)}`
+
     return {
-      context: pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens),
+      turn: `↑${formatTokens(turnIn)}${hitSuffix} ↓${formatTokens(turnOut)}`,
+      session: `Σ ↑${formatTokens(sessionIn)} ↓${formatTokens(sessionOut)}`,
+      sessionHitRate: sessionHitRate !== undefined ? `${sessionHitRate}%` : undefined,
+      context: ctxStr,
       cost: cost > 0 ? money.format(cost) : undefined,
     }
   })
@@ -1135,6 +1184,18 @@ export function Prompt(props: PromptProps) {
       inputText.startsWith("/") &&
       iife(() => {
         const firstLine = inputText.split("\n")[0]
+        const [slashCmd, ...rest] = firstLine.split(" ")
+        const name = slashCmd.slice(1)
+        return command.handleSlash(name, rest.join(" "))
+      })
+    ) {
+      setStore("prompt", "input", "")
+      setStore("prompt", "parts", [])
+      input.clear()
+    } else if (
+      inputText.startsWith("/") &&
+      iife(() => {
+        const firstLine = inputText.split("\n")[0]
         const command = firstLine.split(" ")[0].slice(1)
         return sync.data.command.some((x) => x.name === command)
       })
@@ -1742,7 +1803,19 @@ export function Prompt(props: PromptProps) {
                     <Match when={usage()}>
                       {(item) => (
                         <text fg={theme.textMuted} wrapMode="none">
-                          {[item().context, item().cost].filter(Boolean).join(" · ")}
+                          {[
+                            turnElapsed() || undefined,
+                            tps() ? `${tps()!.live ? "⚡" : "≈"}${tps()!.value}t/s` : undefined,
+                            turnToolCount() > 0 ? `🔧${turnToolCount()}` : undefined,
+                            item().turn,
+                            item().session,
+                            item().sessionHitRate,
+                            compactionCount() > 0 ? `📦${compactionCount()}` : undefined,
+                            item().context,
+                            item().cost,
+                          ]
+                            .filter(Boolean)
+                            .join(" · ")}
                         </text>
                       )}
                     </Match>
