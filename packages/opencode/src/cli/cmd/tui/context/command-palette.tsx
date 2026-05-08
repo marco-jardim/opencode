@@ -59,8 +59,12 @@ export function CommandPaletteProvider(props: ParentProps) {
     keymap.dispatchCommand(command)
   }
 
+  const allEntries = useKeymapSelector((keymap: OpenTuiKeymap) =>
+    keymap.getCommandEntries({ visibility: "registered" }),
+  )
+
   const slashes = createMemo<SlashEntry[]>(() =>
-    entries().flatMap((entry) => {
+    allEntries().flatMap((entry) => {
       const slashName = entry.command.slashName
       if (typeof slashName !== "string" || !slashName) return []
       const slashAliases = entry.command.slashAliases
@@ -80,10 +84,6 @@ export function CommandPaletteProvider(props: ParentProps) {
     }),
   )
 
-  const allEntries = useKeymapSelector((keymap: OpenTuiKeymap) =>
-    keymap.getCommandEntries({ visibility: "registered" }),
-  )
-
   const value: CommandPaletteContext = {
     run,
     handleSlash(name: string, args: string): boolean {
@@ -94,7 +94,7 @@ export function CommandPaletteProvider(props: ParentProps) {
         if (slashName !== name && !(Array.isArray(cmd.slashAliases) && cmd.slashAliases.includes(name))) continue
         const onSlashSubmit = cmd.onSlashSubmit
         if (typeof onSlashSubmit === "function") return (onSlashSubmit as (args: string) => boolean)(args)
-        run(cmd.name)
+        keymap.runCommand(cmd.name)
         return true
       }
       return false
