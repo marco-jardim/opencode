@@ -585,6 +585,8 @@ function pluginApi(runtime: RuntimeState, plugin: PluginEntry, scope: PluginScop
           slashName: cmd.slash?.name,
           slashAliases: cmd.slash?.aliases,
           hidden: cmd.hidden,
+          enabled: typeof cmd.enabled === "function" ? cmd.enabled : cmd.enabled !== false ? undefined : () => false,
+          keys: cmd.keybind,
           onSlashSubmit: cmd.onSlashSubmit,
           run: () => cmd.onSelect?.(),
         })),

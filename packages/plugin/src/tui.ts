@@ -78,7 +78,7 @@ export type TuiCommand = {
   keybind?: string
   suggested?: boolean
   hidden?: boolean
-  enabled?: boolean
+  enabled?: boolean | (() => boolean)
   slash?: {
     name: string
     aliases?: string[]
