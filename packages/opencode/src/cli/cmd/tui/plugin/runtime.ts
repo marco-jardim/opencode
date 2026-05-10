@@ -586,10 +586,12 @@ function pluginApi(runtime: RuntimeState, plugin: PluginEntry, scope: PluginScop
           slashAliases: cmd.slash?.aliases,
           hidden: cmd.hidden,
           enabled: typeof cmd.enabled === "function" ? cmd.enabled : cmd.enabled !== false ? undefined : () => false,
-          keys: cmd.keybind,
           onSlashSubmit: cmd.onSlashSubmit,
           run: () => cmd.onSelect?.(),
         })),
+        bindings: items
+          .filter((cmd) => cmd.keybind)
+          .map((cmd) => ({ key: cmd.keybind!, cmd: cmd.value })),
       })
       scope.track(dispose)
       return dispose
