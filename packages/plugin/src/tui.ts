@@ -502,6 +502,9 @@ export type TuiPluginApi = {
   client: OpencodeClient
   event: TuiEventBus
   renderer: CliRenderer
+  command: {
+    register: (cb: () => TuiCommand[]) => () => void
+  }
   slots: TuiSlots
   plugins: {
     list: () => ReadonlyArray<TuiPluginStatus>

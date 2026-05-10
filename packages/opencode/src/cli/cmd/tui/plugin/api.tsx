@@ -208,6 +208,11 @@ export function createTuiApi(input: Input): TuiPluginApi {
         return Keymap.formatKeyBindings(bindings, input.tuiConfig)
       },
     },
+    command: {
+      register() {
+        throw new Error("command.register is only available in plugin context")
+      },
+    },
     keymap: input.keymap,
     route: {
       register(list) {

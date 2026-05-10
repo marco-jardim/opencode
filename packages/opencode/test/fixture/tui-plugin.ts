@@ -191,6 +191,9 @@ export function createTuiPluginApi(opts: Opts = {}): HostPluginApi {
       formatSequence: () => "",
       formatBindings: () => undefined,
     },
+    command: {
+      register: () => () => {},
+    },
     get client() {
       return client()
     },

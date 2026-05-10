@@ -574,6 +574,26 @@ function pluginApi(runtime: RuntimeState, plugin: PluginEntry, scope: PluginScop
     },
   }
 
+  const command: TuiPluginApi["command"] = {
+    register(cb) {
+      const items = cb()
+      const dispose = api.keymap.registerLayer({
+        commands: items.map((cmd) => ({
+          namespace: "palette",
+          name: cmd.value,
+          desc: cmd.description || cmd.title,
+          slashName: cmd.slash?.name,
+          slashAliases: cmd.slash?.aliases,
+          hidden: cmd.hidden,
+          onSlashSubmit: cmd.onSlashSubmit,
+          run: () => cmd.onSelect?.(),
+        })),
+      })
+      scope.track(dispose)
+      return dispose
+    },
+  }
+
   return {
     app: api.app,
     keys: api.keys,
@@ -589,6 +609,7 @@ function pluginApi(runtime: RuntimeState, plugin: PluginEntry, scope: PluginScop
     },
     event,
     renderer: api.renderer,
+    command,
     slots,
     plugins: {
       list() {
