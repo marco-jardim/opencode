@@ -63,7 +63,6 @@ import { DialogTimeline } from "./dialog-timeline"
 import { DialogForkFromTimeline } from "./dialog-fork-from-timeline"
 import { DialogSessionRename } from "../../component/dialog-session-rename"
 import { Sidebar } from "./sidebar"
-import { SubagentFooter } from "./subagent-footer.tsx"
 import { LANGUAGE_EXTENSIONS } from "@/lsp/language"
 import parsers from "../../../../../../parsers-config.ts"
 import * as Clipboard from "../../util/clipboard"
@@ -1231,9 +1230,7 @@ export function Session() {
                 <Show when={permissions().length === 0 && questions().length > 0}>
                   <QuestionPrompt request={questions()[0]} />
                 </Show>
-                <Show when={session()?.parentID}>
-                  <SubagentFooter />
-                </Show>
+                <TuiPluginRuntime.Slot name="session_footer" session_id={route.sessionID} />
                 <Show when={visible()}>
                   <TuiPluginRuntime.Slot
                     name="session_prompt"

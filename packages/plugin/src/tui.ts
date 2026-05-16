@@ -488,6 +488,15 @@ export type TuiHostSlotMap = {
   sidebar_footer: {
     session_id: string
   }
+  /**
+   * Fork extension: rendered between the session scrollbox and the prompt area
+   * when the session is a subagent (has `parentID`). Used by plugins like
+   * opencode-rich-footer to show cache stats, TPS, context, cost, and
+   * sibling navigation.
+   */
+  session_footer: {
+    session_id: string
+  }
 }
 
 export type TuiSlotMap<Slots extends Record<string, object> = {}> = TuiHostSlotMap & Slots
