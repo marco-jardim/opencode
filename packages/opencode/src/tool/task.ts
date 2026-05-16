@@ -289,6 +289,7 @@ export const TaskTool = Tool.define(
           metadata,
           run: runTask().pipe(
             Effect.tap((result) => inject("completed", resultText(result)).pipe(Effect.ignore)),
+            Effect.map(resultText),
             Effect.catchCause((cause) =>
               (Cause.hasInterruptsOnly(cause)
                 ? Effect.void
@@ -353,11 +354,7 @@ export const TaskTool = Tool.define(
 
             return {
               title: params.description,
-              metadata: {
-                ...metadata,
-                cost: childCost,
-                tokens: childTokens,
-              },
+              metadata,
               output: [
                 `task_id: ${nextSession.id} (for resuming to continue this task if needed)`,
                 `subagent_model: ${childModel}`,

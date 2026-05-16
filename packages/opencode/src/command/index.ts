@@ -256,12 +256,10 @@ export const layer = Layer.effect(
       // #33 Tier 3: Merge Claude Code markdown commands. Priority order:
       // Default > Config > MCP > Claude > Skill. Skip-if-exists guards
       // below ensure higher-priority commands shadow Claude commands.
-      if (!Flag.OPENCODE_DISABLE_EXTERNAL_COMMANDS) {
-        const claudeCommands = yield* Effect.promise(() => loadClaudeCommands(ctx.worktree, ctx.directory))
-        for (const [name, cmd] of Object.entries(claudeCommands)) {
-          if (commands[name]) continue
-          commands[name] = cmd
-        }
+      const claudeCommands = yield* Effect.promise(() => loadClaudeCommands(ctx.worktree, ctx.directory))
+      for (const [name, cmd] of Object.entries(claudeCommands)) {
+        if (commands[name]) continue
+        commands[name] = cmd
       }
 
       for (const item of yield* skill.all()) {
