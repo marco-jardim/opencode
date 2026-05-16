@@ -97,6 +97,12 @@ export type TuiCommand = {
     aliases?: string[]
   }
   onSelect?: (dialog?: TuiDialogStack) => void | Promise<void>
+  /**
+   * Fork extension: called when the slash command is submitted with args.
+   * Return `true` to consume the dispatch (skip running `onSelect`).
+   * Used by plugins like opencode-btw that need to handle freeform args.
+   */
+  onSlashSubmit?: (args: string) => boolean
 }
 
 /**
