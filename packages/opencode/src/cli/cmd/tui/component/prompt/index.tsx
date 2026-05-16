@@ -149,7 +149,6 @@ export function Prompt(props: PromptProps) {
   const project = useProject()
   const sync = useSync()
   const tuiConfig = useTuiConfig()
-  const keymapConfig = tuiConfig.keymap
   const dialog = useDialog()
   const toast = useToast()
   const status = createMemo(() => sync.data.session_status?.[props.sessionID ?? ""] ?? { type: "idle" })
@@ -367,6 +366,7 @@ export function Prompt(props: PromptProps) {
   })
 
   const usage = createMemo(() => {
+    if (!props.sessionID) return
     const all = assistants().filter((m) => m.tokens.output > 0)
     const last = all.at(-1)
     if (!last) return
@@ -659,6 +659,7 @@ export function Prompt(props: PromptProps) {
             dialog,
             sdk,
             sync,
+            project,
             toast,
             onSelect: (selection) => {
               void warpSession(selection)
@@ -678,7 +679,7 @@ export function Prompt(props: PromptProps) {
 
   useBindings(() => ({
     enabled: command.matcher,
-    bindings: keymapConfig.pick("prompt", [
+    bindings: tuiConfig.keybinds.gather("prompt.palette", [
       "prompt.submit",
       "prompt.editor",
       "prompt.editor_context.clear",
@@ -761,7 +762,6 @@ export function Prompt(props: PromptProps) {
       ...input.traits,
       ...computePromptTraits({
         mode: store.mode,
-        disabled: !!props.disabled,
         autocompleteVisible: !!auto()?.visible,
       }),
     }
@@ -913,7 +913,7 @@ export function Prompt(props: PromptProps) {
     return {
       target: inputTarget,
       enabled: inputTarget() !== undefined && !props.disabled,
-      bindings: keymapConfig.pick("prompt", ["prompt.paste"]),
+      bindings: tuiConfig.keybinds.get("prompt.paste"),
     }
   })
 
@@ -921,7 +921,7 @@ export function Prompt(props: PromptProps) {
     return {
       target: inputTarget,
       enabled: inputTarget() !== undefined && !props.disabled && store.prompt.input !== "",
-      bindings: keymapConfig.pick("prompt", ["prompt.clear"]),
+      bindings: tuiConfig.keybinds.get("prompt.clear"),
     }
   })
 
@@ -941,6 +941,8 @@ export function Prompt(props: PromptProps) {
       bindings: [
         {
           key: "!",
+          desc: "Shell mode",
+          group: "Prompt",
           cmd: () => {
             setStore("placeholder", randomIndex(shell().length))
             setStore("mode", "shell")
@@ -954,7 +956,7 @@ export function Prompt(props: PromptProps) {
     return {
       target: inputTarget,
       enabled: inputTarget() !== undefined && store.mode === "shell",
-      bindings: [{ key: "escape", cmd: () => setStore("mode", "normal") }],
+      bindings: [{ key: "escape", desc: "Exit shell mode", group: "Prompt", cmd: () => setStore("mode", "normal") }],
     }
   })
 
@@ -965,7 +967,7 @@ export function Prompt(props: PromptProps) {
         cursorVersion()
         return inputTarget() !== undefined && store.mode === "shell" && input?.visualCursor.offset === 0
       })(),
-      bindings: [{ key: "backspace", cmd: () => setStore("mode", "normal") }],
+      bindings: [{ key: "backspace", desc: "Exit shell mode", group: "Prompt", cmd: () => setStore("mode", "normal") }],
     }
   })
 
@@ -974,25 +976,21 @@ export function Prompt(props: PromptProps) {
       target: inputTarget,
       enabled: (() => {
         cursorVersion()
-        return (
-          inputTarget() !== undefined &&
-          !props.disabled &&
-          !auto()?.visible &&
-          input !== undefined &&
-          (input.cursorOffset === 0 || input.visualCursor.visualRow === 0)
-        )
+        return inputTarget() !== undefined && !props.disabled && !auto()?.visible && input !== undefined
       })(),
       commands: [
         {
           name: "prompt.history.previous",
+          title: "Previous prompt history",
+          category: "Prompt",
           run() {
             if (input.cursorOffset !== 0) {
-              input.cursorOffset = 0
-              return
+              if (input.scrollY + input.visualCursor.visualRow === 0) input.cursorOffset = 0
+              return false
             }
 
             const item = history.move(-1, input.plainText)
-            if (!item) return
+            if (!item) return false
             input.setText(item.input)
             setStore("prompt", item)
             setStore("mode", item.mode ?? "normal")
@@ -1001,7 +999,7 @@ export function Prompt(props: PromptProps) {
           },
         },
       ],
-      bindings: keymapConfig.pick("prompt", ["prompt.history.previous"]),
+      bindings: tuiConfig.keybinds.get("prompt.history.previous"),
     }
   })
 
@@ -1010,25 +1008,25 @@ export function Prompt(props: PromptProps) {
       target: inputTarget,
       enabled: (() => {
         cursorVersion()
-        return (
-          inputTarget() !== undefined &&
-          !props.disabled &&
-          !auto()?.visible &&
-          input !== undefined &&
-          (input.cursorOffset === input.plainText.length || input.visualCursor.visualRow === input.height - 1)
-        )
+        return inputTarget() !== undefined && !props.disabled && !auto()?.visible && input !== undefined
       })(),
       commands: [
         {
           name: "prompt.history.next",
+          title: "Next prompt history",
+          category: "Prompt",
           run() {
             if (input.cursorOffset !== input.plainText.length) {
-              input.cursorOffset = input.plainText.length
-              return
+              if (
+                input.scrollY + input.visualCursor.visualRow ===
+                Math.max(0, input.editorView.getTotalVirtualLineCount() - 1)
+              )
+                input.cursorOffset = input.plainText.length
+              return false
             }
 
             const item = history.move(1, input.plainText)
-            if (!item) return
+            if (!item) return false
             input.setText(item.input)
             setStore("prompt", item)
             setStore("mode", item.mode ?? "normal")
@@ -1037,11 +1035,28 @@ export function Prompt(props: PromptProps) {
           },
         },
       ],
-      bindings: keymapConfig.pick("prompt", ["prompt.history.next"]),
+      bindings: tuiConfig.keybinds.get("prompt.history.next"),
     }
   })
 
+  let submitting = false
   async function submit() {
+    // Prevent overlapping invocations (e.g. a double-pressed Enter, or the
+    // input's native onSubmit racing another dispatch). Without this guard,
+    // a second call slips past the empty-input check before the first call
+    // clears `store.prompt.input`, then awaits its own `session.create` and
+    // ultimately reads the now-empty store — sending a phantom empty prompt
+    // to a freshly created session.
+    if (submitting) return false
+    submitting = true
+    try {
+      return await submitInner()
+    } finally {
+      submitting = false
+    }
+  }
+
+  async function submitInner() {
     setWarpNotice(undefined)
 
     // IME: double-defer may fire before onContentChange flushes the last
@@ -1079,6 +1094,7 @@ export function Prompt(props: PromptProps) {
               dialog,
               sdk,
               sync,
+              project,
               toast,
               onSelect: (selection) => {
                 void warpSession(selection)

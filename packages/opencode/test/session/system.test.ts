@@ -27,6 +27,11 @@ const skills: Skill.Info[] = [
     location: "/tmp/middle-skill/SKILL.md",
     content: "# middle-skill",
   },
+  {
+    name: "manual-skill",
+    location: "/tmp/manual-skill/SKILL.md",
+    content: "# manual-skill",
+  },
 ]
 
 const build: Agent.Info = {
@@ -70,6 +75,7 @@ describe("session.system", () => {
       expect(alpha).toBeGreaterThan(-1)
       expect(middle).toBeGreaterThan(alpha)
       expect(zeta).toBeGreaterThan(middle)
+      expect(output).not.toContain("manual-skill")
     }),
   )
 })
