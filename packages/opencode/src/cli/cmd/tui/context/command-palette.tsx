@@ -1,13 +1,25 @@
-import { createContext, createMemo, createSignal, useContext, type Accessor, type ParentProps } from "solid-js"
+import { createContext, createEffect, createMemo, createRoot, createSignal, on, useContext, type Accessor, type ParentProps } from "solid-js"
 import { DialogSelect, type DialogSelectRef } from "@tui/ui/dialog-select"
 import { useDialog, type DialogContext } from "@tui/ui/dialog"
+import type { ReactiveMatcher } from "@opentui/keymap"
 import {
   formatKeyBindings,
-  reactiveMatcherFromSignal,
   type OpenTuiKeymap,
   useKeymapSelector,
   useOpencodeKeymap,
 } from "../keymap"
+
+function reactiveMatcherFromSignal(signal: () => boolean): ReactiveMatcher {
+  return {
+    get: signal,
+    subscribe(onChange: () => void) {
+      return createRoot((dispose) => {
+        createEffect(on(signal, () => onChange(), { defer: true }))
+        return dispose
+      })
+    },
+  }
+}
 import { useTuiConfig } from "./tui-config"
 
 type SlashEntry = {
@@ -24,7 +36,7 @@ type CommandPaletteContext = {
   slashes: Accessor<readonly SlashEntry[]>
   suspend(enabled: boolean): void
   readonly suspended: boolean
-  matcher: ReturnType<typeof reactiveMatcherFromSignal>
+  matcher: ReactiveMatcher
 }
 
 const COMMAND_PALETTE_DIALOG = "command.palette.show"
