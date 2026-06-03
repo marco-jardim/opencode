@@ -3,12 +3,13 @@ import { pathToFileURL } from "url"
 import { Effect, Layer, Context, Schema } from "effect"
 import { NamedError } from "@opencode-ai/core/util/error"
 import type { Agent } from "@/agent/agent"
-import { Bus } from "@/bus"
+import { EventV2Bridge } from "@/event-v2-bridge"
 import { InstanceState } from "@/effect/instance-state"
 import { Global } from "@opencode-ai/core/global"
 import { Permission } from "@/permission"
-import { AppFileSystem } from "@opencode-ai/core/filesystem"
+import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Config } from "@/config/config"
+import { FrontmatterError } from "@opencode-ai/core/v1/config/error"
 import { ConfigMarkdown } from "@/config/markdown"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Glob } from "@opencode-ai/core/util/glob"
@@ -138,18 +139,18 @@ function inferDescription(body: string): string {
 //   - description: first H1 heading text, else first non-empty paragraph,
 //     truncated to 200 chars. Empty description is allowed (renders as "").
 // Content is always the full file body (frontmatter-stripped when present).
-const addFlat = Effect.fnUntraced(function* (state: State, match: string, bus: Bus.Interface) {
+const addFlat = Effect.fnUntraced(function* (state: State, match: string, events: EventV2Bridge.Service["Service"]) {
   const md = yield* Effect.tryPromise({
     try: () => ConfigMarkdown.parse(match),
     catch: (err) => err,
   }).pipe(
     Effect.catch(
       Effect.fnUntraced(function* (err) {
-        const message = ConfigMarkdown.FrontmatterError.isInstance(err)
+        const message = FrontmatterError.isInstance(err)
           ? err.data.message
           : `Failed to parse flat skill ${match}`
         const { Session } = yield* Effect.promise(() => import("@/session/session"))
-        yield* bus.publish(Session.Event.Error, { error: new NamedError.Unknown({ message }).toObject() })
+        yield* events.publish(Session.Event.Error, { error: new NamedError.Unknown({ message }).toObject() })
         log.error("failed to load flat skill", { skill: match, err })
         return undefined
       }),
@@ -182,18 +183,16 @@ const addFlat = Effect.fnUntraced(function* (state: State, match: string, bus: B
   }
 })
 
-const add = Effect.fnUntraced(function* (state: State, match: string, bus: Bus.Interface) {
+const add = Effect.fnUntraced(function* (state: State, match: string, events: EventV2Bridge.Service["Service"]) {
   const md = yield* Effect.tryPromise({
     try: () => ConfigMarkdown.parse(match),
     catch: (err) => err,
   }).pipe(
     Effect.catch(
       Effect.fnUntraced(function* (err) {
-        const message = ConfigMarkdown.FrontmatterError.isInstance(err)
-          ? err.data.message
-          : `Failed to parse skill ${match}`
+        const message = FrontmatterError.isInstance(err) ? err.data.message : `Failed to parse skill ${match}`
         const { Session } = yield* Effect.promise(() => import("@/session/session"))
-        yield* bus.publish(Session.Event.Error, { error: new NamedError.Unknown({ message }).toObject() })
+        yield* events.publish(Session.Event.Error, { error: new NamedError.Unknown({ message }).toObject() })
         log.error("failed to load skill", { skill: match, err })
         return undefined
       }),
@@ -257,7 +256,7 @@ const scan = Effect.fnUntraced(function* (
 const discoverSkills = Effect.fnUntraced(function* (
   config: Config.Interface,
   discovery: Discovery.Interface,
-  fsys: AppFileSystem.Interface,
+  fsys: FSUtil.Interface,
   global: Global.Interface,
   disableExternalSkills: boolean,
   disableClaudeCodeSkills: boolean,
@@ -329,12 +328,16 @@ const discoverSkills = Effect.fnUntraced(function* (
   }
 })
 
-const loadSkills = Effect.fnUntraced(function* (state: State, discovered: DiscoveryState, bus: Bus.Interface) {
-  yield* Effect.forEach(discovered.matches, (match) => add(state, match, bus), {
+const loadSkills = Effect.fnUntraced(function* (
+  state: State,
+  discovered: DiscoveryState,
+  events: EventV2Bridge.Service["Service"],
+) {
+  yield* Effect.forEach(discovered.matches, (match) => add(state, match, events), {
     concurrency: "unbounded",
     discard: true,
   })
-  yield* Effect.forEach(discovered.flatMatches, (match) => addFlat(state, match, bus), {
+    yield* Effect.forEach(discovered.flatMatches, (match) => addFlat(state, match, events), {
     concurrency: "unbounded",
     discard: true,
   })
@@ -349,8 +352,8 @@ export const layer = Layer.effect(
   Effect.gen(function* () {
     const discovery = yield* Discovery.Service
     const config = yield* Config.Service
-    const bus = yield* Bus.Service
-    const fsys = yield* AppFileSystem.Service
+    const events = yield* EventV2Bridge.Service
+    const fsys = yield* FSUtil.Service
     const global = yield* Global.Service
     const flags = yield* RuntimeFlags.Service
     const discovered = yield* InstanceState.make(
@@ -378,7 +381,7 @@ export const layer = Layer.effect(
           location: "<built-in>",
           content: CUSTOMIZE_OPENCODE_SKILL_BODY,
         }
-        yield* loadSkills(s, yield* InstanceState.get(discovered), bus)
+        yield* loadSkills(s, yield* InstanceState.get(discovered), events)
         return s
       }),
     )
@@ -418,8 +421,8 @@ export const layer = Layer.effect(
 export const defaultLayer = layer.pipe(
   Layer.provide(Discovery.defaultLayer),
   Layer.provide(Config.defaultLayer),
-  Layer.provide(Bus.layer),
-  Layer.provide(AppFileSystem.defaultLayer),
+  Layer.provide(EventV2Bridge.defaultLayer),
+  Layer.provide(FSUtil.defaultLayer),
   Layer.provide(Global.layer),
   Layer.provide(RuntimeFlags.defaultLayer),
 )

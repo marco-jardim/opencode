@@ -1,4 +1,5 @@
 import type { NamedError } from "@opencode-ai/core/util/error"
+import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Cause, Clock, Duration, Effect, Schedule } from "effect"
 import { MessageV2 } from "./message-v2"
 import { iife } from "@/util/iife"
@@ -31,7 +32,7 @@ function cap(ms: number) {
   return Math.min(ms, RETRY_MAX_DELAY)
 }
 
-export function delay(attempt: number, error?: MessageV2.APIError) {
+export function delay(attempt: number, error?: SessionV1.APIError) {
   // #13 Overloaded (529) needs extra breathing room — hammering a
   // struggling provider just makes things worse. Double the base and
   // use a higher backoff factor for this code path specifically.
@@ -73,8 +74,8 @@ export function delay(attempt: number, error?: MessageV2.APIError) {
 
 export function retryable(error: Err, provider: string) {
   // context overflow errors should not be retried
-  if (MessageV2.ContextOverflowError.isInstance(error)) return undefined
-  if (MessageV2.APIError.isInstance(error)) {
+  if (SessionV1.ContextOverflowError.isInstance(error)) return undefined
+  if (SessionV1.APIError.isInstance(error)) {
     // #13 Auth failures (401/403) must never be retried — retrying thrashes
     // the account and masks the real problem. Billing errors (402) likewise.
     const status = error.data.statusCode
@@ -194,7 +195,7 @@ export function policy(opts: {
       const retry = retryable(error, opts.provider)
       if (!retry) return Cause.done(meta.attempt)
       return Effect.gen(function* () {
-        const wait = delay(meta.attempt, MessageV2.APIError.isInstance(error) ? error : undefined)
+        const wait = delay(meta.attempt, SessionV1.APIError.isInstance(error) ? error : undefined)
         const now = yield* Clock.currentTimeMillis
         yield* opts.set({
           attempt: meta.attempt,

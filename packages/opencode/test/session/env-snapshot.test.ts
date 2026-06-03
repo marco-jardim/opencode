@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { Effect } from "effect"
 import z from "zod"
-import { Bus } from "../../src/bus"
+import { EventV2Bridge } from "../../src/event-v2-bridge"
 import type { Provider } from "../../src/provider/provider"
 import { Event as SessionEvent } from "../../src/session/session"
 import { SessionID } from "../../src/session/schema"
 import { SystemPrompt } from "../../src/session/system"
+import { InstanceRef } from "../../src/effect/instance-ref"
 import { provideTestInstance, tmpdir } from "../fixture/fixture"
 
 function fakeModel(): Provider.Model {
@@ -34,13 +35,13 @@ function fakeModel(): Provider.Model {
 
 const OriginalDate = Date
 
-function withMockedDate<A>(iso: string, fn: () => A): A {
+function makeMockDate(iso: string): DateConstructor {
   const fixed = new OriginalDate(iso).getTime()
   // Build a Date-compatible mock via Proxy so `new Date()` returns a Date
   // pinned to `fixed`, while `new Date(x)` and other calls delegate to the
   // real constructor. This preserves full Date semantics without any type
   // suppression.
-  const mock = new Proxy(OriginalDate, {
+  return new Proxy(OriginalDate, {
     construct(target, args) {
       if (args.length === 0) return new target(fixed)
       return Reflect.construct(target, args)
@@ -49,14 +50,26 @@ function withMockedDate<A>(iso: string, fn: () => A): A {
       if (prop === "now") return () => fixed
       return Reflect.get(target, prop, receiver)
     },
-  })
+  }) as unknown as DateConstructor
+}
+
+// Pin `Date` for the *duration of an Effect's execution*. A synchronous
+// helper cannot do this: it restores Date before a lazily-constructed Effect
+// ever runs, so the mock would never cover the async env build.
+function withMockedDateEffect<A, E, R>(iso: string, effect: Effect.Effect<A, E, R>) {
   const globals = globalThis as unknown as { Date: DateConstructor }
-  globals.Date = mock
-  try {
-    return fn()
-  } finally {
-    globals.Date = OriginalDate
-  }
+  return Effect.acquireUseRelease(
+    Effect.sync(() => {
+      const original = globals.Date
+      globals.Date = makeMockDate(iso)
+      return original
+    }),
+    () => effect,
+    (original) =>
+      Effect.sync(() => {
+        globals.Date = original
+      }),
+  )
 }
 
 afterEach(() => {
@@ -69,7 +82,7 @@ describe("session.system env snapshot", () => {
 
     await provideTestInstance({
       directory: tmp.path,
-      fn: async () => {
+      fn: async (ctx) => {
         const model = fakeModel()
         const sessionA = SessionID.descending()
         const sessionB = SessionID.descending()
@@ -80,7 +93,7 @@ describe("session.system env snapshot", () => {
           const second = yield* svc.environmentForSession(sessionA, model)
           const other = yield* svc.environmentForSession(sessionB, model)
           return { first, second, other }
-        }).pipe(Effect.provide(SystemPrompt.defaultLayer))
+        }).pipe(Effect.provide(SystemPrompt.defaultLayer), Effect.provideService(InstanceRef, ctx))
 
         const { first, second, other } = await Effect.runPromise(run)
 
@@ -99,7 +112,7 @@ describe("session.system env snapshot", () => {
 
     await provideTestInstance({
       directory: tmp.path,
-      fn: async () => {
+      fn: async (ctx) => {
         const model = fakeModel()
         const sessionID = SessionID.descending()
 
@@ -107,16 +120,16 @@ describe("session.system env snapshot", () => {
         // Service instance (same cache). Date is swapped between calls.
         const program = Effect.gen(function* () {
           const svc = yield* SystemPrompt.Service
-          const firstEnvEffect = withMockedDate("2026-04-18T10:00:00.000Z", () =>
+          const firstEnv = yield* withMockedDateEffect(
+            "2026-04-18T10:00:00.000Z",
             svc.environmentForSession(sessionID, model),
           )
-          const firstEnv = yield* firstEnvEffect
-          const secondEnvEffect = withMockedDate("2026-04-19T10:00:00.000Z", () =>
+          const secondEnv = yield* withMockedDateEffect(
+            "2026-04-19T10:00:00.000Z",
             svc.environmentForSession(sessionID, model),
           )
-          const secondEnv = yield* secondEnvEffect
           return { firstEnv, secondEnv }
-        }).pipe(Effect.provide(SystemPrompt.defaultLayer))
+        }).pipe(Effect.provide(SystemPrompt.defaultLayer), Effect.provideService(InstanceRef, ctx))
 
         const { firstEnv, secondEnv } = await Effect.runPromise(program)
 
@@ -138,24 +151,24 @@ describe("session.system env snapshot", () => {
 
     await provideTestInstance({
       directory: tmp.path,
-      fn: async () => {
+      fn: async (ctx) => {
         const model = fakeModel()
         const sessionID = SessionID.descending()
 
         const program = Effect.gen(function* () {
           const svc = yield* SystemPrompt.Service
-          const firstEnvEffect = withMockedDate("2026-04-18T10:00:00.000Z", () =>
+          const firstEnv = yield* withMockedDateEffect(
+            "2026-04-18T10:00:00.000Z",
             svc.environmentForSession(sessionID, model),
           )
-          const firstEnv = yield* firstEnvEffect
           // Invalidate, then call with "next day" — must reflect the NEW date
-          const secondEnvEffect = withMockedDate("2026-04-19T10:00:00.000Z", () => {
-            svc.invalidateSessionEnv(sessionID)
-            return svc.environmentForSession(sessionID, model)
-          })
-          const secondEnv = yield* secondEnvEffect
+          svc.invalidateSessionEnv(sessionID)
+          const secondEnv = yield* withMockedDateEffect(
+            "2026-04-19T10:00:00.000Z",
+            svc.environmentForSession(sessionID, model),
+          )
           return { firstEnv, secondEnv }
-        }).pipe(Effect.provide(SystemPrompt.defaultLayer))
+        }).pipe(Effect.provide(SystemPrompt.defaultLayer), Effect.provideService(InstanceRef, ctx))
 
         const { firstEnv, secondEnv } = await Effect.runPromise(program)
 
@@ -178,13 +191,13 @@ describe("session.system env snapshot", () => {
 
     await provideTestInstance({
       directory: tmp.path,
-      fn: async () => {
+      fn: async (ctx) => {
         const model = fakeModel()
         const sessionID = SessionID.descending()
 
         const program = Effect.gen(function* () {
           const svc = yield* SystemPrompt.Service
-          const bus = yield* Bus.Service
+          const events = yield* EventV2Bridge.Service
 
           // Let the layer's bus subscription finish wiring up before we
           // publish — forkScoped returns before the first runForEach pull.
@@ -195,7 +208,7 @@ describe("session.system env snapshot", () => {
 
           // Publish the deletion event and yield long enough for the
           // bus subscriber forked inside the layer to process it.
-          yield* bus.publish(SessionEvent.Deleted, {
+          yield* events.publish(SessionEvent.Deleted, {
             sessionID,
             info: {
               id: sessionID,
@@ -209,7 +222,7 @@ describe("session.system env snapshot", () => {
 
           const after = yield* svc.environmentForSession(sessionID, model)
           return { before, cachedHit, after }
-        }).pipe(Effect.provide(SystemPrompt.defaultLayer))
+        }).pipe(Effect.provide(SystemPrompt.defaultLayer), Effect.provideService(InstanceRef, ctx))
 
         const { before, cachedHit, after } = await Effect.runPromise(program)
 

@@ -1,12 +1,20 @@
 import { afterEach, test, expect } from "bun:test"
 import path from "path"
 import fs from "fs/promises"
+import { Effect } from "effect"
 import { Command } from "../../src/command"
 import { makeRuntime } from "../../src/effect/run-service"
+import { InstanceRef } from "../../src/effect/instance-ref"
+import type { InstanceContext } from "../../src/project/instance-context"
 import { disposeAllInstances, provideTestInstance, tmpdir } from "../fixture/fixture"
 
 const { runPromise } = makeRuntime(Command.Service, Command.defaultLayer)
-const listCommands = (): Promise<Command.Info[]> => runPromise((svc: any) => svc.list())
+// InstanceState.context now reads the active instance from the Effect context
+// (InstanceRef). makeRuntime's `attach` only propagates it from a surrounding
+// fiber, and these tests call listCommands from a plain async fn (no fiber), so
+// we provide the loaded instance explicitly.
+const listCommands = (ctx: InstanceContext): Promise<Command.Info[]> =>
+  runPromise((svc: any) => svc.list().pipe(Effect.provideService(InstanceRef, ctx)))
 
 // #33 Tier 3: End-to-end coverage for the Claude Code markdown commands loader.
 // These tests seed a temporary HOME and/or project .claude/commands directory
@@ -38,8 +46,8 @@ test("discovers project commands from .claude/commands", async () => {
 
   await provideTestInstance({
     directory: tmp.path,
-    fn: async () => {
-      const commands = await listCommands()
+    fn: async (ctx) => {
+      const commands = await listCommands(ctx)
       const hello = commands.find((c) => c.name === "hello")
       expect(hello).toBeDefined()
       expect(hello!.source).toBe("claude")
@@ -65,8 +73,8 @@ test("discovers global commands from ~/.claude/commands", async () => {
 
     await provideTestInstance({
       directory: tmp.path,
-      fn: async () => {
-        const commands = await listCommands()
+      fn: async (ctx) => {
+        const commands = await listCommands(ctx)
         const hello = commands.find((c) => c.name === "global-hello")
         expect(hello).toBeDefined()
         expect(hello!.source).toBe("claude")
@@ -94,8 +102,8 @@ test("namespaces nested commands with colon separator", async () => {
 
   await provideTestInstance({
     directory: tmp.path,
-    fn: async () => {
-      const commands = await listCommands()
+    fn: async (ctx) => {
+      const commands = await listCommands(ctx)
       const commit = commands.find((c) => c.name === "git:commit")
       const push = commands.find((c) => c.name === "git:push")
       expect(commit).toBeDefined()
@@ -127,8 +135,8 @@ test("discovers plugin commands from ~/.claude/plugins/cache/**/commands", async
 
     await provideTestInstance({
       directory: tmp.path,
-      fn: async () => {
-        const commands = await listCommands()
+      fn: async (ctx) => {
+        const commands = await listCommands(ctx)
         const cmd = commands.find((c) => c.name === "plug-cmd")
         expect(cmd).toBeDefined()
         expect(cmd!.source).toBe("claude")
@@ -164,8 +172,8 @@ Review code based on: **$ARGUMENTS**
 
   await provideTestInstance({
     directory: tmp.path,
-    fn: async () => {
-      const commands = await listCommands()
+    fn: async (ctx) => {
+      const commands = await listCommands(ctx)
       const review = commands.find((c) => c.name === "cr-review")
       expect(review).toBeDefined()
       expect(review!.source).toBe("claude")
@@ -198,8 +206,8 @@ test("config commands shadow claude commands with the same name", async () => {
 
   await provideTestInstance({
     directory: tmp.path,
-    fn: async () => {
-      const commands = await listCommands()
+    fn: async (ctx) => {
+      const commands = await listCommands(ctx)
       const deploy = commands.find((c) => c.name === "deploy")
       expect(deploy).toBeDefined()
       expect(deploy!.source).toBe("command")
@@ -237,8 +245,8 @@ skill body
 
   await provideTestInstance({
     directory: tmp.path,
-    fn: async () => {
-      const commands = await listCommands()
+    fn: async (ctx) => {
+      const commands = await listCommands(ctx)
       const shared = commands.find((c) => c.name === "shared")
       expect(shared).toBeDefined()
       expect(shared!.source).toBe("claude")
@@ -272,8 +280,8 @@ test("OPENCODE_DISABLE_EXTERNAL_COMMANDS skips claude command discovery", async 
     // see Flag definition for the precedence rules.
     await provideTestInstance({
       directory: tmp.path,
-      fn: async () => {
-        const commands = await listCommands()
+      fn: async (ctx) => {
+        const commands = await listCommands(ctx)
         const disabled = commands.find((c) => c.name === "disabled-cmd")
         // Note: this assertion may pass-through if Flag was already loaded
         // with the env unset. Production enforcement happens at CLI startup.

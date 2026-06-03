@@ -1,4 +1,4 @@
-import { Context, Effect, Layer, Stream } from "effect"
+import { Context, Effect, Layer } from "effect"
 
 import { InstanceState } from "@/effect/instance-state"
 
@@ -15,7 +15,8 @@ import type { Provider } from "@/provider/provider"
 import type { Agent } from "@/agent/agent"
 import { Permission } from "@/permission"
 import { Skill } from "@/skill"
-import { Bus } from "@/bus"
+import { EventV2Bridge } from "@/event-v2-bridge"
+import { EventV2 } from "@opencode-ai/core/event"
 import type { SessionID } from "./schema"
 import { Event as SessionEvent } from "./session"
 
@@ -48,7 +49,7 @@ export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const skill = yield* Skill.Service
-    const bus = yield* Bus.Service
+    const events = yield* EventV2Bridge.Service
 
     // Session-keyed env snapshot cache. Keeps the env preamble stable for
     // the lifetime of a session so date/branch/etc don't invalidate the
@@ -57,10 +58,12 @@ export const layer = Layer.effect(
 
     // Purge the cached env snapshot when a session is deleted so the map
     // does not grow unbounded across long-lived instances.
-    yield* bus.subscribe(SessionEvent.Deleted).pipe(
-      Stream.runForEach((evt) => Effect.sync(() => envCache.delete(evt.properties.sessionID))),
-      Effect.forkScoped,
-    )
+    const unsubscribe = yield* events.listen((event) => {
+      if (event.type !== SessionEvent.Deleted.type) return Effect.void
+      const data = event.data as EventV2.Data<typeof SessionEvent.Deleted>
+      return Effect.sync(() => envCache.delete(data.sessionID))
+    })
+    yield* Effect.addFinalizer(() => unsubscribe)
 
     return Service.of({
       environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model) {
@@ -122,6 +125,9 @@ export const layer = Layer.effect(
   }),
 )
 
-export const defaultLayer = layer.pipe(Layer.provideMerge(Skill.defaultLayer), Layer.provideMerge(Bus.defaultLayer))
+export const defaultLayer = layer.pipe(
+  Layer.provideMerge(Skill.defaultLayer),
+  Layer.provideMerge(EventV2Bridge.defaultLayer),
+)
 
 export * as SystemPrompt from "./system"
