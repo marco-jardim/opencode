@@ -171,6 +171,11 @@ function stateApi(sync: ReturnType<typeof useSync>): TuiPluginApi["state"] {
       question(sessionID) {
         return sync.data.question[sessionID] ?? []
       },
+      children(sessionID) {
+        return sync.data.session
+          .filter((x) => x.parentID === sessionID)
+          .toSorted((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      },
     },
     part(messageID) {
       return sync.data.part[messageID] ?? []

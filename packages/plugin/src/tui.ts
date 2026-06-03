@@ -398,6 +398,7 @@ export type TuiState = {
     status: (sessionID: string) => SessionStatus | undefined
     permission: (sessionID: string) => ReadonlyArray<PermissionRequest>
     question: (sessionID: string) => ReadonlyArray<QuestionRequest>
+    children: (sessionID: string) => ReadonlyArray<Session>
   }
   part: (messageID: string) => ReadonlyArray<Part>
   lsp: () => ReadonlyArray<TuiSidebarLspItem>
