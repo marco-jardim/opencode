@@ -238,6 +238,13 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           }
           break
         }
+        // `session.created` fires when the server first persists a session,
+        // including child/subagent sessions spawned by the task tool. The TUI
+        // previously only handled `session.updated`, so freshly-created child
+        // sessions never entered `data.session` and the "view subagents"
+        // navigation (children()) had nothing to jump to. Insert on creation
+        // too, reusing the same sorted-insert/reconcile path.
+        case "session.created":
         case "session.updated": {
           const result = Binary.search(store.session, event.properties.info.id, (s) => s.id)
           if (result.found) {
