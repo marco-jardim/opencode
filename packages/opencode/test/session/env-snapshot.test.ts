@@ -212,6 +212,9 @@ describe("session.system env snapshot", () => {
             sessionID,
             info: {
               id: sessionID,
+              slug: "",
+              projectID: "",
+              directory: tmp.path,
               title: "",
               version: "",
               time: { created: 0, updated: 0 },
