@@ -346,7 +346,7 @@ export const TaskTool = Tool.define(
               })
             }
 
-            Log.create({ service: "tool.task" }).info("subagent.complete", {
+            Log.create({ service: "tool.task" }).debug("subagent.complete", {
               subagent: params.subagent_type,
               session_id: nextSession.id,
               model: childModel,
