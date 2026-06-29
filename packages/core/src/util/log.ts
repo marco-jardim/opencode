@@ -2,7 +2,7 @@ export * as Log from "./log"
 
 import path from "path"
 import fs from "fs/promises"
-import { createWriteStream } from "fs"
+import { createWriteStream, mkdirSync } from "fs"
 import * as Global from "../global"
 import { Schema } from "effect"
 import { Glob } from "./glob"
@@ -22,7 +22,10 @@ const levelPriority: Record<Level, number> = {
 const keep = 10
 const initializedRunID = "OPENCODE_LOG_INITIALIZED_RUN_ID"
 
-let level: Level = "INFO"
+let level: Level = (() => {
+  const env = process.env.OPENCODE_LOG_LEVEL?.toUpperCase()
+  return env && env in levelPriority ? (env as Level) : "INFO"
+})()
 
 function shouldLog(input: Level): boolean {
   return levelPriority[input] >= levelPriority[level]
@@ -58,31 +61,74 @@ let logpath = ""
 export function file() {
   return logpath
 }
+
+let fileWrite: ((msg: any) => number) | undefined
+function ensureFileSink(): ((msg: any) => number) | undefined {
+  if (fileWrite) return fileWrite
+  try {
+    mkdirSync(Global.Path.log, { recursive: true })
+    logpath = path.join(Global.Path.log, new Date().toISOString().split(".")[0].replace(/:/g, "") + ".log")
+    const stream = createWriteStream(logpath, { flags: "a" })
+    fileWrite = (msg: any) => {
+      stream.write(msg)
+      return msg.length
+    }
+    void cleanup(Global.Path.log)
+  } catch {
+    fileWrite = undefined
+  }
+  return fileWrite
+}
+
 let write = (msg: any) => {
-  process.stderr.write(msg)
+  // Explicit opt-in (e.g. --print-logs) sends logs to stderr; otherwise route to
+  // the rolling log file so logs never overwrite the TUI sharing this terminal.
+  if (process.env.OPENCODE_PRINT_LOGS === "1") {
+    process.stderr.write(msg)
+    return msg.length
+  }
+  const sink = ensureFileSink()
+  if (sink) return sink(msg)
+  process.stderr.write(msg) // last-resort fallback if the log dir is unwritable
   return msg.length
 }
 
 export async function init(options: Options) {
   if (options.level) level = options.level
   void cleanup(Global.Path.log)
-  if (options.print) return
-  logpath = path.join(
-    Global.Path.log,
-    options.dev ? "dev.log" : new Date().toISOString().split(".")[0].replace(/:/g, "") + ".log",
-  )
-  const runID = process.env.OPENCODE_RUN_ID
-  const shouldTruncate = !options.dev || !runID || process.env[initializedRunID] !== runID
-  if (shouldTruncate) await fs.truncate(logpath).catch(() => {})
-  if (options.dev && runID) process.env[initializedRunID] = runID
-  const stream = createWriteStream(logpath, { flags: "a" })
-  write = async (msg: any) => {
-    return new Promise((resolve, reject) => {
-      stream.write(msg, (err) => {
-        if (err) reject(err)
-        else resolve(msg.length)
-      })
-    })
+  if (options.print) {
+    write = (msg: any) => {
+      process.stderr.write(msg)
+      return msg.length
+    }
+    return
+  }
+  // dev.log keeps its special-cased name and OPENCODE_RUN_ID-aware truncation; all
+  // other cases reuse the single lazy file sink so there is exactly one file stream.
+  if (options.dev) {
+    try {
+      mkdirSync(Global.Path.log, { recursive: true })
+      logpath = path.join(Global.Path.log, "dev.log")
+      const runID = process.env.OPENCODE_RUN_ID
+      const shouldTruncate = !runID || process.env[initializedRunID] !== runID
+      if (shouldTruncate) await fs.truncate(logpath).catch(() => {})
+      if (runID) process.env[initializedRunID] = runID
+      const stream = createWriteStream(logpath, { flags: "a" })
+      fileWrite = (msg: any) => {
+        stream.write(msg)
+        return msg.length
+      }
+    } catch {
+      fileWrite = undefined
+    }
+  } else {
+    ensureFileSink()
+  }
+  write = (msg: any) => {
+    const sink = fileWrite ?? ensureFileSink()
+    if (sink) return sink(msg)
+    process.stderr.write(msg)
+    return msg.length
   }
 }
 
