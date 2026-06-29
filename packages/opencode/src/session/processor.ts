@@ -441,7 +441,7 @@ export const layer = Layer.effect(
               usage: value.usage ?? new Usage({}),
               metadata: value.providerMetadata,
             })
-            log.info("usage", {
+            log.debug("usage", {
               input: usage.tokens.input,
               output: usage.tokens.output,
               reasoning: usage.tokens.reasoning,
