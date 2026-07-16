@@ -58,7 +58,8 @@ Grouped from the 51 non-merge fork commits since merge-base `1fd8bf526d`:
 ### Session / core (`packages/opencode/src/session/*`, `packages/core`)
 - `compaction.threshold` config: auto-compact before context overflow (`session/compaction.ts`, `session/overflow.ts`).
 - Env snapshot cached per session; `envCache` purged on `session.deleted` (leak fix) (`session/system.ts` + `test/session/env-snapshot.test.ts`).
-- Retry hardening for 529 overload + auth/billing errors (`session/retry.ts`).
+- Retry hardening for 529 overload + auth/billing errors, with an eight-attempt cap so retryable provider failures cannot retain sessions indefinitely (`session/retry.ts`).
+- Provider loop guard exits after three consecutive `tool-calls` finishes without usable tool calls, preventing malformed provider output from retaining sessions indefinitely (`session/prompt.ts`).
 - Subagent cost attribution and usage telemetry; telemetry demoted to debug level (`session/processor.ts`, `tool/task.ts`).
 - Subagent system prompt scoping + token economy (`session/system.ts`, `tool/task.ts`).
 - `util/log`: route to file by default, stderr only with `--print-logs` (`packages/core/src/util/log.ts`).

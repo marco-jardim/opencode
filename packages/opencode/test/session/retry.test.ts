@@ -115,6 +115,33 @@ describe("session.retry.delay", () => {
       })
     }),
   )
+
+  it.instance("policy stops after the maximum retry attempts", () =>
+    Effect.gen(function* () {
+      const error = apiError({ "retry-after-ms": "0" })
+      const attempts: number[] = []
+      const step = yield* Schedule.toStepWithMetadata(
+        SessionRetry.policy({
+          provider: "test",
+          parse: Schema.decodeUnknownSync(SessionV1.APIError.Schema),
+          set: (info) =>
+            Effect.sync(() => {
+              attempts.push(info.attempt)
+            }),
+        }),
+      )
+
+      const exits = yield* Effect.forEach(
+        Array.from({ length: SessionRetry.RETRY_MAX_ATTEMPTS + 1 }),
+        () => step(error).pipe(Effect.exit),
+      )
+
+      expect(attempts).toEqual(
+        Array.from({ length: SessionRetry.RETRY_MAX_ATTEMPTS }, (_, index) => index + 1),
+      )
+      expect(exits.at(-1)?._tag).toBe("Failure")
+    }),
+  )
 })
 
 describe("session.retry.retryable", () => {

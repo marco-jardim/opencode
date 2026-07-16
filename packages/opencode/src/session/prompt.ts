@@ -1078,11 +1078,14 @@ const layer = Layer.effect(
       throw new Error("Impossible")
     })
 
+    const MAX_CONSECUTIVE_EMPTY_TOOL_CALLS = 3
+
     const runLoop: (sessionID: SessionID) => Effect.Effect<SessionV1.WithParts> = Effect.fn("SessionPrompt.run")(
       function* (sessionID: SessionID) {
         const ctx = yield* InstanceState.context
         let structured: unknown
         let step = 0
+        let consecutiveEmptyToolCalls = 0
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
 
         while (true) {
@@ -1107,6 +1110,20 @@ const layer = Layer.effect(
             lastAssistantMsg?.parts.some(
               (part) => part.type === "tool" && !part.metadata?.providerExecuted && !isOrphanedInterruptedTool(part),
             ) ?? false
+
+          // Providers can report tool-calls after malformed calls were discarded; cap repeats so the session can idle.
+          consecutiveEmptyToolCalls =
+            lastAssistant?.finish === "tool-calls" && !hasToolCalls && lastUser.id < lastAssistant.id
+              ? consecutiveEmptyToolCalls + 1
+              : 0
+          if (consecutiveEmptyToolCalls >= MAX_CONSECUTIVE_EMPTY_TOOL_CALLS) {
+            yield* Effect.logWarning("loop exit after repeated tool-calls without tool calls", {
+              "session.id": sessionID,
+              messageID: lastAssistant?.id,
+              count: consecutiveEmptyToolCalls,
+            })
+            break
+          }
 
           if (
             lastAssistant?.finish &&
