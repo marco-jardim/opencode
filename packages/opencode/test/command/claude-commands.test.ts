@@ -1,4 +1,5 @@
 import { afterEach, test, expect } from "bun:test"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import path from "path"
 import fs from "fs/promises"
 import { Effect } from "effect"
@@ -8,13 +9,13 @@ import { InstanceRef } from "../../src/effect/instance-ref"
 import type { InstanceContext } from "../../src/project/instance-context"
 import { disposeAllInstances, provideTestInstance, tmpdir } from "../fixture/fixture"
 
-const { runPromise } = makeRuntime(Command.Service, Command.defaultLayer)
+const { runPromise } = makeRuntime(Command.Service, LayerNode.compile(Command.node))
 // InstanceState.context now reads the active instance from the Effect context
 // (InstanceRef). makeRuntime's `attach` only propagates it from a surrounding
 // fiber, and these tests call listCommands from a plain async fn (no fiber), so
 // we provide the loaded instance explicitly.
 const listCommands = (ctx: InstanceContext): Promise<Command.Info[]> =>
-  runPromise((svc: any) => svc.list().pipe(Effect.provideService(InstanceRef, ctx)))
+  runPromise((svc) => svc.list().pipe(Effect.provideService(InstanceRef, ctx)))
 
 // #33 Tier 3: End-to-end coverage for the Claude Code markdown commands loader.
 // These tests seed a temporary HOME and/or project .claude/commands directory

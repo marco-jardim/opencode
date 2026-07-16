@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Effect } from "effect"
 import z from "zod"
 import { EventV2Bridge } from "../../src/event-v2-bridge"
@@ -8,6 +9,8 @@ import { SessionID } from "../../src/session/schema"
 import { SystemPrompt } from "../../src/session/system"
 import { InstanceRef } from "../../src/effect/instance-ref"
 import { provideTestInstance, tmpdir } from "../fixture/fixture"
+
+const systemLayer = LayerNode.compile(LayerNode.group([SystemPrompt.node, EventV2Bridge.node]))
 
 function fakeModel(): Provider.Model {
   return {
@@ -93,7 +96,7 @@ describe("session.system env snapshot", () => {
           const second = yield* svc.environmentForSession(sessionA, model)
           const other = yield* svc.environmentForSession(sessionB, model)
           return { first, second, other }
-        }).pipe(Effect.provide(SystemPrompt.defaultLayer), Effect.provideService(InstanceRef, ctx))
+        }).pipe(Effect.provide(systemLayer), Effect.provideService(InstanceRef, ctx))
 
         const { first, second, other } = await Effect.runPromise(run)
 
@@ -129,7 +132,7 @@ describe("session.system env snapshot", () => {
             svc.environmentForSession(sessionID, model),
           )
           return { firstEnv, secondEnv }
-        }).pipe(Effect.provide(SystemPrompt.defaultLayer), Effect.provideService(InstanceRef, ctx))
+        }).pipe(Effect.provide(systemLayer), Effect.provideService(InstanceRef, ctx))
 
         const { firstEnv, secondEnv } = await Effect.runPromise(program)
 
@@ -168,7 +171,7 @@ describe("session.system env snapshot", () => {
             svc.environmentForSession(sessionID, model),
           )
           return { firstEnv, secondEnv }
-        }).pipe(Effect.provide(SystemPrompt.defaultLayer), Effect.provideService(InstanceRef, ctx))
+        }).pipe(Effect.provide(systemLayer), Effect.provideService(InstanceRef, ctx))
 
         const { firstEnv, secondEnv } = await Effect.runPromise(program)
 
@@ -225,7 +228,7 @@ describe("session.system env snapshot", () => {
 
           const after = yield* svc.environmentForSession(sessionID, model)
           return { before, cachedHit, after }
-        }).pipe(Effect.provide(SystemPrompt.defaultLayer), Effect.provideService(InstanceRef, ctx))
+        }).pipe(Effect.provide(systemLayer), Effect.provideService(InstanceRef, ctx))
 
         const { before, cachedHit, after } = await Effect.runPromise(program)
 

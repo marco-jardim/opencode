@@ -9,6 +9,7 @@ import PROMPT_BEAST from "./prompt/beast.txt"
 import PROMPT_GEMINI from "./prompt/gemini.txt"
 import PROMPT_GPT from "./prompt/gpt.txt"
 import PROMPT_KIMI from "./prompt/kimi.txt"
+import PROMPT_META from "./prompt/meta.txt"
 
 import PROMPT_CODEX from "./prompt/codex.txt"
 import PROMPT_TRINITY from "./prompt/trinity.txt"
@@ -28,6 +29,7 @@ import { MCP } from "@/mcp"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 
 export function provider(model: Provider.Model) {
+  if (model.api.id.includes("muse-spark")) return [PROMPT_META]
   if (model.api.id.includes("gpt-4") || model.api.id.includes("o1") || model.api.id.includes("o3"))
     return [PROMPT_BEAST]
   if (model.api.id.includes("gpt")) {
@@ -53,7 +55,7 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SystemPrompt") {}
 
-export const layer = Layer.effect(
+const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const skill = yield* Skill.Service
@@ -75,62 +77,51 @@ export const layer = Layer.effect(
     })
     yield* Effect.addFinalizer(() => unsubscribe)
 
+    const environment = Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model) {
+      const ctx = yield* InstanceState.context
+      const references = yield* Effect.gen(function* () {
+        return (yield* (yield* Reference.Service).list()).filter((reference) => reference.description !== undefined)
+      }).pipe(Effect.provide(locations.get(Location.Ref.make({ directory: AbsolutePath.make(ctx.directory) }))))
+      return [
+        [
+          `You are powered by the model named ${model.api.id}. The exact model ID is ${model.providerID}/${model.api.id}`,
+          `Here is some useful information about the environment you are running in:`,
+          `<env>`,
+          `  Working directory: ${ctx.directory}`,
+          `  Workspace root folder: ${ctx.worktree}`,
+          `  Is directory a git repo: ${ctx.project.vcs === "git" ? "yes" : "no"}`,
+          `  Platform: ${process.platform}`,
+          `  Today's date: ${new Date().toDateString()}`,
+          `</env>`,
+        ].join("\n"),
+        references.length === 0
+          ? undefined
+          : [
+              "Project references provide additional directories that can be accessed when relevant.",
+              "<available_references>",
+              ...references
+                .toSorted((a, b) => a.name.localeCompare(b.name))
+                .flatMap((reference) => [
+                  "  <reference>",
+                  `    <name>${reference.name}</name>`,
+                  `    <path>${reference.path}</path>`,
+                  ...(reference.description === undefined
+                    ? []
+                    : [`    <description>${reference.description}</description>`]),
+                  "  </reference>",
+                ]),
+              "</available_references>",
+            ].join("\n"),
+      ].filter((part): part is string => part !== undefined)
+    })
+
     return Service.of({
-      environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model) {
-        const ctx = yield* InstanceState.context
-        const references = yield* Effect.gen(function* () {
-          return (yield* (yield* Reference.Service).list()).filter((reference) => reference.description !== undefined)
-        }).pipe(Effect.provide(locations.get(Location.Ref.make({ directory: AbsolutePath.make(ctx.directory) }))))
-        return [
-          [
-            `You are powered by the model named ${model.api.id}. The exact model ID is ${model.providerID}/${model.api.id}`,
-            `Here is some useful information about the environment you are running in:`,
-            `<env>`,
-            `  Working directory: ${ctx.directory}`,
-            `  Workspace root folder: ${ctx.worktree}`,
-            `  Is directory a git repo: ${ctx.project.vcs === "git" ? "yes" : "no"}`,
-            `  Platform: ${process.platform}`,
-            `  Today's date: ${new Date().toDateString()}`,
-            `</env>`,
-          ].join("\n"),
-          references.length === 0
-            ? undefined
-            : [
-                "Project references provide additional directories that can be accessed when relevant.",
-                "<available_references>",
-                ...references
-                  .toSorted((a, b) => a.name.localeCompare(b.name))
-                  .flatMap((reference) => [
-                    "  <reference>",
-                    `    <name>${reference.name}</name>`,
-                    `    <path>${reference.path}</path>`,
-                    ...(reference.description === undefined
-                      ? []
-                      : [`    <description>${reference.description}</description>`]),
-                    "  </reference>",
-                  ]),
-                "</available_references>",
-              ].join("\n"),
-        ].filter((part): part is string => part !== undefined)
-      }),
+      environment,
 
       environmentForSession: Effect.fn("SystemPrompt.environmentForSession")(function* (sessionID: SessionID, model: Provider.Model) {
         const cached = envCache.get(sessionID)
         if (cached) return cached
-        const ctx = yield* InstanceState.context
-        const fresh = [
-          [
-            `You are powered by the model named ${model.api.id}. The exact model ID is ${model.providerID}/${model.api.id}`,
-            `Here is some useful information about the environment you are running in:`,
-            `<env>`,
-            `  Working directory: ${ctx.directory}`,
-            `  Workspace root folder: ${ctx.worktree}`,
-            `  Is directory a git repo: ${ctx.project.vcs === "git" ? "yes" : "no"}`,
-            `  Platform: ${process.platform}`,
-            `  Today's date: ${new Date().toDateString()}`,
-            `</env>`,
-          ].join("\n"),
-        ]
+        const fresh = yield* environment(model)
         envCache.set(sessionID, fresh)
         return fresh
       }),
@@ -172,16 +163,6 @@ export const layer = Layer.effect(
       }),
     })
   }),
-)
-
-export const defaultLayer = layer.pipe(
-  Layer.provide(Skill.defaultLayer),
-  Layer.provide(MCP.defaultLayer),
-  Layer.provide(locationServiceMapLayer),
-  // provideMerge (not provide) so the SAME EventV2Bridge instance is both used
-  // by the env-cache invalidation subscription inside this layer AND exposed to
-  // consumers that publish session-lifecycle events (e.g. the env-snapshot test).
-  Layer.provideMerge(EventV2Bridge.defaultLayer),
 )
 
 const locationServiceMapNode = LayerNode.make({
