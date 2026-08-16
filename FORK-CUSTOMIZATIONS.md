@@ -1,8 +1,8 @@
 # Fork Customizations — Anti-Regression Register
 
 > Fork: `marco-jardim/opencode` (remote `fork`) · Upstream: `anomalyco/opencode` (remote `origin`, branch `dev`)
-> Last updated: 2026-07-16 (pre-merge snapshot; merge-base `1fd8bf526d`, 2026-06-29)
-> Local state at snapshot: 65 commits ahead / 427 behind `origin/dev`.
+> Last updated: 2026-08-16 (post-merge snapshot; merged `origin/dev` @ `3fd77ae980` via `088e6cdc34`)
+> All section 1 APIs verified present after merge; typecheck green in core/plugin/opencode/tui; targeted tests 165 pass / 0 fail.
 
 This document is the authoritative contract of what the fork adds on top of upstream.
 **Any upstream merge MUST preserve every item in section 1.** Use section 4 as the
@@ -58,7 +58,7 @@ Grouped from the 51 non-merge fork commits since merge-base `1fd8bf526d`:
 ### Session / core (`packages/opencode/src/session/*`, `packages/core`)
 - `compaction.threshold` config: auto-compact before context overflow (`session/compaction.ts`, `session/overflow.ts`).
 - Env snapshot cached per session; `envCache` purged on `session.deleted` (leak fix) (`session/system.ts` + `test/session/env-snapshot.test.ts`).
-- Retry hardening for 529 overload + auth/billing errors, with an eight-attempt cap so retryable provider failures cannot retain sessions indefinitely (`session/retry.ts`).
+- Retry hardening for 529 overload (doubled base delay, backoff factor 3) + auth/billing errors (401/402/403 never retried) (`session/retry.ts`). The retry-attempt cap was upstreamed: upstream's `RETRY_MAX_RETRIES = 5` (2026-08-16 merge) replaced the fork's `RETRY_MAX_ATTEMPTS = 8`; the fork-only surface is now just the 529 delay shaping (threaded through upstream's jittered `exponential()`) and the 401/402/403 guard.
 - Provider loop guard exits after three consecutive `tool-calls` finishes without usable tool calls, preventing malformed provider output from retaining sessions indefinitely (`session/prompt.ts`).
 - Subagent cost attribution and usage telemetry; telemetry demoted to debug level (`session/processor.ts`, `tool/task.ts`).
 - Subagent system prompt scoping + token economy (`session/system.ts`, `tool/task.ts`).
