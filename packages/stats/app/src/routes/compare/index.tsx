@@ -1,4 +1,3 @@
-import "../index.css"
 import { Meta, Title } from "@solidjs/meta"
 import { ProviderIcon } from "@opencode-ai/ui/provider-icon"
 import { createAsync } from "@solidjs/router"
@@ -21,6 +20,7 @@ import {
   applyThemePreference,
   Footer,
   getGitHubStars,
+  githubLink,
   Header,
   isThemePreference,
   themeStorageKey,
@@ -126,7 +126,11 @@ export default function ModelCompareIndex() {
       <Meta name="twitter:description" content={compareDescription} />
       <Meta name="twitter:image" content={statsUnfurlUrl} />
       <Meta name="twitter:image:alt" content={i18n.t("app.unfurlAlt")} />
-      <Header githubStars={githubStars() ?? "150K"} links={compareHeaderLinks()} brandHref={import.meta.env.BASE_URL} />
+      <Header
+        githubStars={githubStars() ?? githubLink.fallbackStars}
+        links={compareHeaderLinks()}
+        brandHref={import.meta.env.BASE_URL}
+      />
       <div data-component="container">
         <div data-component="content">
           <section id="compare-tool" data-section="compare-home-hero">
